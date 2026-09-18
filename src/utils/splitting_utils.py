@@ -94,7 +94,15 @@ def flashsplat(dataset : ModelParams, iteration : int, pipeline : PipelineParams
                 if render_mask.sum() == 0:
                     continue
                 for row, mask in enumerate(render_mask):
+                    # A row can have zero visible pixels for this specific view (the
+                    # tracked object just isn't visible from this camera) even though
+                    # it's a real object elsewhere - mask.max() == 0 there, which isn't
+                    # a valid obj_id (object_lists/obj_num above already excludes
+                    # obj_id <= 0 the same way). Treating it as a new "object 0" here
+                    # gave mapping more distinct entries than all_counts was sized for.
                     obj_id = int(mask.max().item())
+                    if obj_id <= 0:
+                        continue
                     if obj_id not in mapping.keys():
                         mapping[obj_id] = 1 if len(mapping.keys())==0 else max(mapping.values())+1
                         num_observation[obj_id] = 1
@@ -107,18 +115,26 @@ def flashsplat(dataset : ModelParams, iteration : int, pipeline : PipelineParams
                 else:
                     render_mask_per_view = torch.zeros_like(render_mask)
                     for row, mask in enumerate(render_mask):
-                        render_mask_per_view[row] = mask * (row+1) / mask.max()
+                        mask_max = mask.max()
+                        if mask_max > 0:
+                            # Guard against the same zero-visible-pixel row dividing by 0
+                            # (NaN/Inf here previously fed straight into flashsplat_render's
+                            # CUDA kernel, which is the more likely cause of the earlier
+                            # "illegal memory access" crash than raw object count).
+                            render_mask_per_view[row] = mask * (row+1) / mask_max
                     obj_num_per_view = len(render_mask)
-                    
+
                 render_pkg = flashsplat_render(view, gaussians, pipeline, background, gt_mask=render_mask_per_view.sum(0), obj_num=obj_num_per_view)
                 used_count = render_pkg["used_count"]
-                                
+
                 if all_counts is None:
                     all_counts = torch.zeros((obj_num+1, used_count.shape[-1]), device=used_count.device)
-                
+
                 all_counts[0] += used_count[0]
                 for row, mask in enumerate(render_mask):
                     obj_id = int(mask.max().item())
+                    if obj_id <= 0:
+                        continue
                     all_counts[mapping[obj_id]] += used_count[row+1]
 
             inverse_mapping = {value:key for key, value in mapping.items()}
