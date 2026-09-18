@@ -70,7 +70,6 @@ def flashsplat(dataset : ModelParams, iteration : int, pipeline : PipelineParams
 
             render_masks.append(torch.from_numpy(obj_mask).to("cuda").to(torch.float32))
         obj_num = len(object_lists)
-        print(f"DEBUG flashsplat: obj_num={obj_num} object_lists={object_lists} len(render_masks)={len(render_masks)}", flush=True)
 
         gaussians = GaussianModel(dataset.sh_degree)
         scene = Scene(dataset, gaussians, load_iteration=iteration, shuffle=False)
@@ -89,13 +88,9 @@ def flashsplat(dataset : ModelParams, iteration : int, pipeline : PipelineParams
         mapping = {}
         num_observation = {}
 
-        print(f"DEBUG flashsplat: view_num={view_num} len(views_used)={len(views_used)}", flush=True)
         if obj_num > 0:
             for idx, view in enumerate(views_used):
                 render_mask = render_masks[idx].to(torch.float32)
-                print(f"DEBUG flashsplat: idx={idx} render_mask.shape={tuple(render_mask.shape)} "
-                      f"sum={render_mask.sum().item()} per_row_max={[int(m.max().item()) for m in render_mask]} "
-                      f"mapping={mapping}", flush=True)
                 if render_mask.sum() == 0:
                     continue
                 for row, mask in enumerate(render_mask):
@@ -114,20 +109,22 @@ def flashsplat(dataset : ModelParams, iteration : int, pipeline : PipelineParams
                     else:
                         num_observation[obj_id] += 1
 
-                if obj_num == 1:
-                    render_mask_per_view = render_mask
-                    obj_num_per_view = 1
-                else:
-                    render_mask_per_view = torch.zeros_like(render_mask)
-                    for row, mask in enumerate(render_mask):
-                        mask_max = mask.max()
-                        if mask_max > 0:
-                            # Guard against the same zero-visible-pixel row dividing by 0
-                            # (NaN/Inf here previously fed straight into flashsplat_render's
-                            # CUDA kernel, which is the more likely cause of the earlier
-                            # "illegal memory access" crash than raw object count).
-                            render_mask_per_view[row] = mask * (row+1) / mask_max
-                    obj_num_per_view = len(render_mask)
+                # Relabel every row by its position (1, 2, ...) regardless of the *global*
+                # obj_num - a single tracked object can still fragment into multiple
+                # disconnected SAM components within one view, so obj_num == 1 doesn't
+                # imply this view has only one mask row. A shortcut here used to assume
+                # it did (skipping relabeling whenever obj_num == 1), which indexed
+                # used_count out of bounds whenever a view actually had >1 rows.
+                render_mask_per_view = torch.zeros_like(render_mask)
+                for row, mask in enumerate(render_mask):
+                    mask_max = mask.max()
+                    if mask_max > 0:
+                        # Guard against a zero-visible-pixel row dividing by 0 (NaN/Inf
+                        # here previously fed straight into flashsplat_render's CUDA
+                        # kernel, which is the more likely cause of the earlier
+                        # "illegal memory access" crash than raw object count).
+                        render_mask_per_view[row] = mask * (row+1) / mask_max
+                obj_num_per_view = len(render_mask)
 
                 render_pkg = flashsplat_render(view, gaussians, pipeline, background, gt_mask=render_mask_per_view.sum(0), obj_num=obj_num_per_view)
                 used_count = render_pkg["used_count"]
@@ -140,10 +137,6 @@ def flashsplat(dataset : ModelParams, iteration : int, pipeline : PipelineParams
                     obj_id = int(mask.max().item())
                     if obj_id <= 0:
                         continue
-                    if obj_id not in mapping:
-                        print(f"DEBUG flashsplat: idx={idx} row={row} obj_id={obj_id} not in mapping={mapping} "
-                              f"obj_num={obj_num} render_mask.shape={tuple(render_mask.shape)} "
-                              f"per_row_max={[int(m.max().item()) for m in render_mask]}", flush=True)
                     all_counts[mapping[obj_id]] += used_count[row+1]
 
             inverse_mapping = {value:key for key, value in mapping.items()}
