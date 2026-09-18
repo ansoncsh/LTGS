@@ -114,9 +114,7 @@ def find_3d_correspondences(before_pcds, after_pcds, fused_outputs, matching_obj
 
         pcd1 = torch.from_numpy(before_pcds[obj_label]).to(torch.float32).cuda()
         pcd2 = torch.from_numpy(after_pcds[obj_label]).to(torch.float32).cuda()
-        pca_desc_1 = compute_pca_image(desc_3d_1)
-        pca_desc_2 = compute_pca_image(desc_3d_2)
-        
+
         # Find 3D correspondences
         # Build cosine similarity matrix and Hungarian matching
         # kp_idx_1, kp_idx_2 = torch.argsort(desc_3d_1, descending=True)[:num_sample], torch.argsort(desc_3d_2, descending=True)[:num_sample]
@@ -147,32 +145,40 @@ def find_3d_correspondences(before_pcds, after_pcds, fused_outputs, matching_obj
         num_vis = min(50, len(valid_match_idx))
         visualize_match_idx = valid_match_idx[:num_vis]
 
-        fig, axes = plt.subplots(1, 2, figsize=(12, 6)) 
-        for i, cam_idx in enumerate([0, 1]): 
-            ax = axes[i]
-            ax.scatter(proj1_xy[cam_idx, valid_idx_1, 0], proj1_xy[cam_idx, valid_idx_1, 1], c=pca_desc_1, s=5, alpha=0.6)
-            ax.scatter(proj2_xy[cam_idx, valid_idx_2, 0], proj2_xy[cam_idx, valid_idx_2, 1], c=pca_desc_2, s=5, alpha=0.6)
+        # Debug visualization only (obj_kpts_1/obj_kpts_2 below don't depend on it) -
+        # an object with no samples on one side (e.g. every camera's projection for it
+        # was empty - see fuse_multiview_descriptors) has nothing to plot, and PCA
+        # needs at least one sample.
+        if len(desc_3d_1) > 0 and len(desc_3d_2) > 0:
+            pca_desc_1 = compute_pca_image(desc_3d_1)
+            pca_desc_2 = compute_pca_image(desc_3d_2)
 
-            # Plot matches as lines
-            for idx in visualize_match_idx:
-                src_idx, tgt_idx = kp_idx_1[matches[idx, 0]], kp_idx_2[matches[idx, 1]]
+            fig, axes = plt.subplots(1, 2, figsize=(12, 6))
+            for i, cam_idx in enumerate([0, 1]):
+                ax = axes[i]
+                ax.scatter(proj1_xy[cam_idx, valid_idx_1, 0], proj1_xy[cam_idx, valid_idx_1, 1], c=pca_desc_1, s=5, alpha=0.6)
+                ax.scatter(proj2_xy[cam_idx, valid_idx_2, 0], proj2_xy[cam_idx, valid_idx_2, 1], c=pca_desc_2, s=5, alpha=0.6)
 
-                x1, y1 = proj1_xy[cam_idx, valid_idx_1][src_idx]
-                x2, y2 = proj2_xy[cam_idx, valid_idx_2][tgt_idx]
+                # Plot matches as lines
+                for idx in visualize_match_idx:
+                    src_idx, tgt_idx = kp_idx_1[matches[idx, 0]], kp_idx_2[matches[idx, 1]]
 
-                ax.plot([x1, x2], [y1, y2], color='red', alpha=1, linewidth=1.0)
+                    x1, y1 = proj1_xy[cam_idx, valid_idx_1][src_idx]
+                    x2, y2 = proj2_xy[cam_idx, valid_idx_2][tgt_idx]
 
-            ax.set_title(f'2D Projection (Camera {cam_idx})')
-            ax.set_xlim([0, 960])
-            ax.set_ylim([540, 0])
+                    ax.plot([x1, x2], [y1, y2], color='red', alpha=1, linewidth=1.0)
 
-            ax.set_xlabel('NDC X')
-            ax.set_ylabel('NDC Y')
-            ax.grid(True)
+                ax.set_title(f'2D Projection (Camera {cam_idx})')
+                ax.set_xlim([0, 960])
+                ax.set_ylim([540, 0])
 
-        plt.tight_layout()
-        plt.savefig(f"{descriptor_path}/3d_pca_w_matches_{obj_label}.png")
-        plt.close()
+                ax.set_xlabel('NDC X')
+                ax.set_ylabel('NDC Y')
+                ax.grid(True)
+
+            plt.tight_layout()
+            plt.savefig(f"{descriptor_path}/3d_pca_w_matches_{obj_label}.png")
+            plt.close()
 
         # TODO: double check if valid_match_idx is correct
         obj_kpts_1[obj_label] = kpts_1[valid_matches[:,0]]
