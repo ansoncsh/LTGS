@@ -50,7 +50,14 @@ import matplotlib.pyplot as plt
 from skimage.metrics import structural_similarity 
 import glob
 
-def prepare_output_and_logger(args):    
+def temporal_group(image_name, reference_prefix):
+    # The baseline capture's images may be flat files directly prefixed by
+    # reference_prefix (no subfolder), while every other timestep's images live
+    # under their own subfolder - normalize both to the same group identity so
+    # they index consistently into temporal_inputs/opacity_filters/est_mats.
+    return reference_prefix if image_name.startswith(reference_prefix) else image_name.split('/')[0]
+
+def prepare_output_and_logger(args):
     if not args.model_path:
         if os.getenv('OAR_JOB_ID'):
             unique_str=os.getenv('OAR_JOB_ID')
@@ -511,12 +518,17 @@ def refine_optimize(dataset, opt, pipe, gaussians, scene, hloc_cameras, canonica
     #         dataset.train_test_exp = False
     #         render_gaussians(dataset, pipe, gaussians, scene.test_cameras, background, None, None, None, None, None, None, render_all_path, gt_all_path)
 
+    reference_prefix = getattr(dataset, "reference_prefix", None) or "IMG_0000"
+
     hloc_cameras_all = hloc_cameras.copy()
     if not use_previous_viewpoints:
         for idx, camera in enumerate(hloc_cameras):
             filename = f"{idx:05}.png"
             image_path = os.path.join(output_dir, "change", "renders", filename)
-            image_name = scene.train_cameras[0].image_name.split('/')[0] + "/" + filename
+            # These synthetic cameras render the baseline/target_timestep-0 state,
+            # so they always belong to the reference group regardless of how the
+            # baseline camera's own image_name happens to be structured.
+            image_name = reference_prefix + "/" + filename
             cam_info = CameraInfo(uid=hloc_cameras[-1].uid+1, R=camera.R, T=camera.T, FovY=camera.FovY, FovX=camera.FovX, depth_params=camera.depth_params,
                                 image_path=image_path, image_name=image_name, depth_path=camera.depth_path,
                                 width=camera.width, height=camera.height, is_test=True)
@@ -525,7 +537,6 @@ def refine_optimize(dataset, opt, pipe, gaussians, scene, hloc_cameras, canonica
         prev_cameras_all = []
         previous_rendered_path = sorted(glob.glob(os.path.join(dataset.model_path.replace("_update", ""), "train", "ours_30000", "renders", "*.png")))
 
-        reference_prefix = getattr(dataset, "reference_prefix", None) or "IMG_0000"
         for idx, camera in enumerate(sorted(scene.train_cameras, key=lambda cam: cam.image_name)):
             if not camera.image_name.startswith(reference_prefix):
                 continue
@@ -540,11 +551,10 @@ def refine_optimize(dataset, opt, pipe, gaussians, scene, hloc_cameras, canonica
     change_cameras = cameraList_from_camInfos(hloc_cameras_all, 1.0, dataset, False, True, height=hloc_cameras[0].height, width=hloc_cameras[0].width)
 
     images_all = sorted([cam.image_name for cam in hloc_cameras_all])
-    temporal_inputs = sorted(set([image.split('/')[0] for image in images_all]))
+    temporal_inputs = sorted(set([temporal_group(image, reference_prefix) for image in images_all]))
     # The baseline/reference-scene folder (reference_prefix, "IMG_0000" for the demo scenes)
     # must be temporal_inputs[0] regardless of alphabetical sort order, since target_timestep=0
     # and everything downstream indexes into temporal_inputs assuming index 0 is the baseline.
-    reference_prefix = getattr(dataset, "reference_prefix", None) or "IMG_0000"
     if reference_prefix in temporal_inputs:
         temporal_inputs.remove(reference_prefix)
     temporal_inputs.insert(0, reference_prefix)
@@ -666,7 +676,7 @@ def refine_optimize(dataset, opt, pipe, gaussians, scene, hloc_cameras, canonica
         vind = viewpoint_indices.pop(rand_idx)
 
         # Transform Gaussians
-        time_idx = temporal_inputs.index(viewpoint_cam.image_name.split('/')[0])
+        time_idx = temporal_inputs.index(temporal_group(viewpoint_cam.image_name, reference_prefix))
         
         if time_idx == 0 and opt.initial_time_loss_weight == 0 and len(opt.invalid_initialization)==len(temporal_inputs)-1 and not use_previous_viewpoints:
             if iteration == last_iter:
@@ -715,9 +725,10 @@ def refine_optimize(dataset, opt, pipe, gaussians, scene, hloc_cameras, canonica
         if time_idx == 0 and not use_previous_viewpoints:
             image_idx = int(len(images_all)/2 + int(viewpoint_cam.image_name.split('/')[-1].split('.')[0]))
             # Update-timestep folders are only numerically suffixed (IMG_0002, ...) for the
-            # sequential demo-scene convention; a non-numeric folder (e.g. "L5_art") can never
-            # be in opt.invalid_initialization (a list of ints), so skip the check for it.
-            change_suffix = images_all[image_idx].split('/')[0].split('_')[1] if '_' in images_all[image_idx].split('/')[0] else ''
+            # sequential demo-scene convention; a non-numeric folder name can never be in
+            # opt.invalid_initialization (a list of ints), so skip the check for it.
+            image_group = temporal_group(images_all[image_idx], reference_prefix)
+            change_suffix = image_group.split('_')[1] if '_' in image_group else ''
             if change_suffix.isdigit() and int(change_suffix) in opt.invalid_initialization:
                 loss *= opt.initial_time_loss_weight
     
@@ -858,7 +869,7 @@ def refine_optimize(dataset, opt, pipe, gaussians, scene, hloc_cameras, canonica
                 localize_render_gaussians(dataset, pipe, gaussians, scene, background, object_indices, time_idx, target_timestep, opacity_filters, object_tracks, est_mats, source_path, output_dir, os.path.join(render_all_path, str(time_idx)), os.path.join(capture_all_path, str(time_idx)), temporal_inputs[time_idx], est_mats_errors)
             else:
                 dataset.train_test_exp = False
-                test_cam = [cam for cam in scene.test_cameras if cam.image_name.split('/')[0] == temporal_inputs[time_idx]] # scene.test_cameras 
+                test_cam = [cam for cam in scene.test_cameras if temporal_group(cam.image_name, reference_prefix) == temporal_inputs[time_idx]] # scene.test_cameras
                 render_gaussians(dataset, pipe, gaussians, test_cam, background, object_indices, time_idx, target_timestep, opacity_filters, object_tracks, est_mats, os.path.join(render_all_path, str(time_idx)),  os.path.join(capture_all_path, str(time_idx)), est_mats_errors)
 
 if __name__ == "__main__":
