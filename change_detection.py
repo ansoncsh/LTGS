@@ -40,6 +40,22 @@ class Point:
     def __repr__(self):
         return f'x: {self.x}, y: {self.y}, instance_id: {self.instance_id}, type: {self.type}'
 
+# SAM ViT-H's relative-position attention decomposition allocates a tensor whose
+# size is quadratic in each spatial dimension of GeSCF's img_size (see
+# add_decomposed_rel_pos in segment_anything/modeling/image_encoder.py). At the
+# ~1024px long side SAM was pretrained/normally run at, that's fine; run it on a
+# multi-thousand-pixel capture (e.g. an un-downscaled phone photo) and a single
+# attention layer alone can try to allocate tens of GB. Cap GeSCF's own working
+# resolution here, independent of the (W, H) masks get resized back to below, so
+# large captures don't OOM the SAM backbone.
+MAX_GESCF_SIDE = 1024
+
+def _capped_gescf_size(w, h, max_side=MAX_GESCF_SIDE):
+    if max(w, h) <= max_side:
+        return (w, h)
+    scale = max_side / max(w, h)
+    return (max(1, round(w * scale)), max(1, round(h * scale)))
+
 _worker_models = {}
 
 def _init_change_detection_worker(alpha_t, cosine_thr, ssim_ratio, kernel_ratio):
@@ -62,7 +78,7 @@ def _get_worker_model(img_size):
 
 def _process_change_pair(args):
     pair_idx, render_file, capture_file, W, H = args
-    model = _get_worker_model((W, H))
+    model = _get_worker_model(_capped_gescf_size(W, H))
     with torch.no_grad():
         change_mask_t0, embed_t0, _ = model(render_file, capture_file)
         resized_mask_t0 = cv2.resize(change_mask_t0.astype(np.uint8), (W, H), interpolation=cv2.INTER_LINEAR)
@@ -297,7 +313,7 @@ def change_detection(dataset : ModelParams, min_size: int, max_size: int, connec
             for render_idx, capture_idx in zip(render_indices, capture_indices):
                 print(f"Detecting changes for {int(render_idx/2)+1}th set of images ...")
                 H, W = image_batch[render_idx].shape[0], image_batch[render_idx].shape[1]
-                model = get_model((W, H))
+                model = get_model(_capped_gescf_size(W, H))
                 if manual_selection:
                     predictor = SamPredictor(model.sam_backbone)
                 change_mask_t0, embed_t0, _ = model(imagefiles[render_idx], imagefiles[capture_idx])
