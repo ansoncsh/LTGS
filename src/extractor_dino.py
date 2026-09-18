@@ -188,12 +188,21 @@ class ViTExtractor:
         prep_img = prep(pil_image)[None, ...]
         return prep_img
     
-    def preprocess_inputfile(self, inputfiles: List):
+    def preprocess_inputfile(self, inputfiles: List, load_size: Union[int, Tuple[int, int]] = None):
         def divisible_by_num(num, dim):
             return num * (dim // num)
-        
+
         patch_size = self.model.patch_embed.patch_size[0]
         pil_imgs = [Image.open(inputfile).convert('RGB') for inputfile in inputfiles]
+        if load_size is not None:
+            # Unlike preprocess() (single image), this used to keep every image's native
+            # resolution (just rounded to a patch_size multiple) and stack the whole batch
+            # (both render + capture images, so 2x the camera count) into one forward pass -
+            # fine at the ~800px demo-scene resolution this was written for, but an OOM at
+            # the ~1600px this dataset's images get downscaled to. Resize to the caller's
+            # working resolution first, same as preprocess() already does.
+            pil_imgs = [transforms.Resize(load_size, interpolation=transforms.InterpolationMode.LANCZOS)(pil_img)
+                        for pil_img in pil_imgs]
         width, height = pil_imgs[0].size
         new_width = divisible_by_num(patch_size, width)
         new_height = divisible_by_num(patch_size, height)

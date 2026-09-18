@@ -92,7 +92,7 @@ def extract_2d_descriptors(matching_obj_labels, object_masks, imagefiles, descri
     patch_size = dino_extractor.model.patch_embed.patch_size[0]
     
     # Extract dino descriptors
-    image_batch, new_height, new_width = dino_extractor.preprocess_inputfile(inputfiles)
+    image_batch, new_height, new_width = dino_extractor.preprocess_inputfile(inputfiles, load_size=(h, w))
     dino_descriptors = dino_extractor.extract_descriptors(image_batch.to('cuda'), layer=11, facet='token', bin=False)
     
     num_patches = int(new_height / patch_size), int(new_width / patch_size)
