@@ -1,0 +1,55 @@
+[project]
+name = "ltgs"
+version = "0.1.0"
+description = "LTGS: Long-Term Gaussian Scene Chronology From Sparse View Updates"
+requires-python = "==3.10.*"
+dependencies = [
+    "torch==2.5.1",
+    "torchvision==0.20.1",
+    "torchaudio==2.5.1",
+    "opencv-python",
+    "joblib",
+    "tqdm",
+    "open3d",
+    "pycolmap==3.10.0",
+    "numpy==1.26.4",
+    "timm",
+    "future",
+    "consoleprinter",
+    "pip",
+    "plyfile",
+    "scikit-image",
+    "einops",
+    "h5py",
+    "roma",
+    "hloc",
+    "diff_gaussian_rasterization",
+    "simple_knn",
+    "fused_ssim",
+    "flashsplat_rasterization",
+]
+
+[[tool.uv.index]]
+name = "pytorch-cu121"
+url = "https://download.pytorch.org/whl/cu121"
+explicit = true
+
+[tool.uv.sources]
+# Use CUDA 12.1 wheels on Linux; fall back to PyPI (CPU/MPS builds) elsewhere.
+torch = [{ index = "pytorch-cu121", marker = "sys_platform == 'linux'" }]
+torchvision = [{ index = "pytorch-cu121", marker = "sys_platform == 'linux'" }]
+torchaudio = [{ index = "pytorch-cu121", marker = "sys_platform == 'linux'" }]
+hloc = { path = "submodules/Hierarchical-Localization", editable = true }
+diff_gaussian_rasterization = { path = "gaussian-splatting/submodules/diff-gaussian-rasterization", editable = true }
+simple_knn = { path = "gaussian-splatting/submodules/simple-knn", editable = true }
+fused_ssim = { path = "gaussian-splatting/submodules/fused-ssim", editable = true }
+flashsplat_rasterization = { path = "gaussian-splatting/submodules/flashsplat-rasterization", editable = true }
+
+[tool.uv.workspace]
+exclude = [
+    "submodules/Hierarchical-Localization",
+    "gaussian-splatting/submodules/diff-gaussian-rasterization",
+    "gaussian-splatting/submodules/simple-knn",
+    "gaussian-splatting/submodules/fused-ssim",
+    "gaussian-splatting/submodules/flashsplat-rasterization",
+]

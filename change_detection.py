@@ -7,6 +7,7 @@ import cv2
 # cv2.waitKey(1000)
 # cv2.destroyAllWindows()
 import torch
+import torch.multiprocessing as mp
 import os
 
 from argparse import ArgumentParser
@@ -38,6 +39,29 @@ class Point:
 
     def __repr__(self):
         return f'x: {self.x}, y: {self.y}, instance_id: {self.instance_id}, type: {self.type}'
+
+_worker_model = None
+
+def _init_change_detection_worker(img_size, alpha_t, cosine_thr, ssim_ratio, kernel_ratio):
+    # Each worker process builds its own GeSCF (incl. a SAM ViT-H instance on
+    # cuda:0, ~7.4GB VRAM) once, then reuses it for every pair it's assigned.
+    global _worker_model
+    _worker_model = GeSCF(img_size=img_size, alpha_t=alpha_t, cosine_thr=cosine_thr,
+                           ssim_ratio=ssim_ratio, kernel_ratio=kernel_ratio)
+
+def _process_change_pair(args):
+    pair_idx, render_file, capture_file, W, H = args
+    with torch.no_grad():
+        change_mask_t0, embed_t0, _ = _worker_model(render_file, capture_file)
+        resized_mask_t0 = cv2.resize(change_mask_t0.astype(np.uint8), (W, H), interpolation=cv2.INTER_LINEAR)
+        resized_mask_t0 = (resized_mask_t0 > 0.5).astype(bool)
+
+        # in reverse order
+        change_mask_t1, embed_t1, _ = _worker_model(capture_file, render_file)
+        resized_mask_t1 = cv2.resize(change_mask_t1.astype(np.uint8), (W, H), interpolation=cv2.INTER_LINEAR)
+        resized_mask_t1 = (resized_mask_t1 > 0.5).astype(bool)
+
+    return pair_idx, resized_mask_t0, embed_t0.detach().cpu(), resized_mask_t1, embed_t1.detach().cpu()
 
 def instance_id_to_color(id):
     rgb = [0, 0, 0]
@@ -211,7 +235,7 @@ def filter_objects_by_size(label_image, min_size=0, max_size=-1, connectivity=1)
     else:
         return small_removed
     
-def change_detection(dataset : ModelParams, min_size: int, max_size: int, connectivity: int, split_thres: float, kernel_size:int, alpha_t: float, cosine_thr: float, ssim_ratio: float, kernel_ratio: float, manual_selection: bool):
+def change_detection(dataset : ModelParams, min_size: int, max_size: int, connectivity: int, split_thres: float, kernel_size:int, alpha_t: float, cosine_thr: float, ssim_ratio: float, kernel_ratio: float, manual_selection: bool, num_workers: int = 1):
     with torch.no_grad(): 
         source_path = Path(dataset.source_path)
         scene_name = source_path.parent.stem if str(source_path).endswith("hloc") else source_path.stem
@@ -236,32 +260,62 @@ def change_detection(dataset : ModelParams, min_size: int, max_size: int, connec
         capture_indices = [idx for idx in range(len(query_list)) if idx % 2 != 0]
 
         H, W = image_batch[0].shape[0], image_batch[0].shape[1]
-    
-        # GeSCF model        
+
+        # GeSCF model
         # Tune thres, ssim_ratio, kernel_ratio
-        model = GeSCF(img_size=(W,H), alpha_t=alpha_t, cosine_thr=cosine_thr, ssim_ratio=ssim_ratio, kernel_ratio=kernel_ratio)
-        if manual_selection:
-            predictor = SamPredictor(model.sam_backbone)
+        num_pairs = len(render_indices)
+        change_masks = [None] * (2 * num_pairs)
+        embeddings_list = [None] * (2 * num_pairs)
 
-        # Inference
-        change_masks, embeddings = [], []
-        for render_idx, capture_idx in zip(render_indices, capture_indices):
-            print(f"Detecting changes for {int(render_idx/2)+1}th set of images ...")
-            change_mask_t0, embed_t0, _ = model(imagefiles[render_idx], imagefiles[capture_idx])   
-            resized_mask_t0 = cv2.resize(change_mask_t0.astype(np.uint8), (W, H), interpolation=cv2.INTER_LINEAR)
-            resized_mask_t0 = (resized_mask_t0 > 0.5).astype(bool)
-            change_masks.append(resized_mask_t0)
-            embeddings.append(embed_t0)
-            
-            # in reverse order
-            change_mask_t1, embed_t1, _ = model(imagefiles[capture_idx], imagefiles[render_idx])   
-            resized_mask_t1 = cv2.resize(change_mask_t1.astype(np.uint8), (W, H), interpolation=cv2.INTER_LINEAR)
-            resized_mask_t1 = (resized_mask_t1 > 0.5).astype(bool)
-            change_masks.append(resized_mask_t1)
-            embeddings.append(embed_t1)
+        if manual_selection or num_workers <= 1:
+            model = GeSCF(img_size=(W,H), alpha_t=alpha_t, cosine_thr=cosine_thr, ssim_ratio=ssim_ratio, kernel_ratio=kernel_ratio)
+            if manual_selection:
+                predictor = SamPredictor(model.sam_backbone)
 
-        embeddings = torch.cat(embeddings, dim=0)
-        
+            # Inference
+            for render_idx, capture_idx in zip(render_indices, capture_indices):
+                print(f"Detecting changes for {int(render_idx/2)+1}th set of images ...")
+                change_mask_t0, embed_t0, _ = model(imagefiles[render_idx], imagefiles[capture_idx])
+                resized_mask_t0 = cv2.resize(change_mask_t0.astype(np.uint8), (W, H), interpolation=cv2.INTER_LINEAR)
+                resized_mask_t0 = (resized_mask_t0 > 0.5).astype(bool)
+                change_masks[render_idx] = resized_mask_t0
+                embeddings_list[render_idx] = embed_t0
+
+                # in reverse order
+                change_mask_t1, embed_t1, _ = model(imagefiles[capture_idx], imagefiles[render_idx])
+                resized_mask_t1 = cv2.resize(change_mask_t1.astype(np.uint8), (W, H), interpolation=cv2.INTER_LINEAR)
+                resized_mask_t1 = (resized_mask_t1 > 0.5).astype(bool)
+                change_masks[capture_idx] = resized_mask_t1
+                embeddings_list[capture_idx] = embed_t1
+            del model
+        else:
+            # Each pair's two GeSCF forward passes (SAM automatic mask generation
+            # dominated by CPU-side NMS/postprocessing, not GPU compute - see
+            # investigation notes) are independent of every other pair, so farm
+            # them out across worker processes instead of running ~4400 pairs
+            # one at a time on a single CPU core.
+            ctx = mp.get_context("spawn")
+            tasks = [
+                (pair_i, imagefiles[render_idx], imagefiles[capture_idx], W, H)
+                for pair_i, (render_idx, capture_idx) in enumerate(zip(render_indices, capture_indices))
+            ]
+            done = 0
+            with ctx.Pool(
+                processes=num_workers,
+                initializer=_init_change_detection_worker,
+                initargs=((W, H), alpha_t, cosine_thr, ssim_ratio, kernel_ratio),
+            ) as pool:
+                for pair_i, resized_mask_t0, embed_t0, resized_mask_t1, embed_t1 in pool.imap_unordered(_process_change_pair, tasks):
+                    render_idx, capture_idx = render_indices[pair_i], capture_indices[pair_i]
+                    change_masks[render_idx] = resized_mask_t0
+                    embeddings_list[render_idx] = embed_t0
+                    change_masks[capture_idx] = resized_mask_t1
+                    embeddings_list[capture_idx] = embed_t1
+                    done += 1
+                    print(f"Detecting changes for {pair_i+1}th set of images ... ({done}/{num_pairs} done)")
+
+        embeddings = torch.cat(embeddings_list, dim=0)
+
         # show_change_masks(image_batch, change_masks, scene_name, render_indices, capture_indices)
 
         # Cluster and separate change masks into objects
@@ -344,8 +398,6 @@ def change_detection(dataset : ModelParams, min_size: int, max_size: int, connec
         save_sam_outputs(object_masks, embeddings.detach().cpu().numpy(), sam_output_path)
         print("Done Saving SAM Embeddings")
 
-        del model
-
         return object_masks, embeddings
 
 if __name__ == "__main__":
@@ -364,8 +416,15 @@ if __name__ == "__main__":
     parser.add_argument("--ssim_ratio", default=0.35, type=float) 
     parser.add_argument("--kernel_ratio", default=0.03, type=float) 
     parser.add_argument("--manual_selection", action="store_true")
-    
+    parser.add_argument("--num_workers", default=1, type=int,
+                         help="Number of worker processes to run change-detection pairs "
+                              "in parallel (each loads its own SAM model, ~7.4GB VRAM). "
+                              "GeSCF's automatic mask generation is CPU-bound (NMS/mask "
+                              "postprocessing), not GPU-bound, so parallelizing across "
+                              "processes speeds up large query sets substantially. "
+                              "1 = original sequential behavior.")
+
     args = get_combined_args(parser)
     print("Detecting changes in " + args.model_path)
 
-    object_masks, embeddings = change_detection(model.extract(args), args.min_size, args.max_size, args.connectivity, args.split_thres, args.kernel_size, args.alpha_t, args.cosine_thr, args.ssim_ratio, args.kernel_ratio, args.manual_selection)
+    object_masks, embeddings = change_detection(model.extract(args), args.min_size, args.max_size, args.connectivity, args.split_thres, args.kernel_size, args.alpha_t, args.cosine_thr, args.ssim_ratio, args.kernel_ratio, args.manual_selection, args.num_workers)

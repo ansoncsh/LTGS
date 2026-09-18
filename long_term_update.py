@@ -144,15 +144,9 @@ def render_gaussians(dataset, pipe, gaussians, cameras, background, object_indic
 
     return renderings, gts
 
-def localize_render_gaussians(dataset, pipe, gaussians, scene, background, object_indices, time_idx, target_timestep, opacity_filters, object_tracks, est_mats, source_path, output_dir, render_all_path, gt_all_path, est_mats_errors=None):
-    images_txt_path = source_path.parent / Path("images/changes.txt")
+def localize_render_gaussians(dataset, pipe, gaussians, scene, background, object_indices, time_idx, target_timestep, opacity_filters, object_tracks, est_mats, source_path, output_dir, render_all_path, gt_all_path, change_dir, est_mats_errors=None):
     test_hloc_path = os.path.join(output_dir, "update", "test_hloc_results.json")
-    with open(images_txt_path, 'r') as file:            
-        images_path = file.read().strip().split()
-    
-    change_idx = int(images_path[0].split('/')[0].split('_')[-1])+time_idx-1
-    change_dir = f"IMG_{change_idx:04d}"
-    scene_info = sceneLoadTypeCallbacks["Colmap"](str(source_path.parent), dataset.images, dataset.depths, True, dataset.train_test_exp, change_dir=None)
+    scene_info = sceneLoadTypeCallbacks["Colmap"](str(source_path.parent), dataset.images, dataset.depths, True, dataset.train_test_exp, change_dir=None, reference_prefix=getattr(dataset, "reference_prefix", None) or "IMG_0000")
     
     if not os.path.exists(test_hloc_path):
         test_hloc_results = find_test_cam_poses(dataset, scene_info)
@@ -524,8 +518,9 @@ def refine_optimize(dataset, opt, pipe, gaussians, scene, hloc_cameras, canonica
         prev_cameras_all = []
         previous_rendered_path = sorted(glob.glob(os.path.join(dataset.model_path.replace("_update", ""), "train", "ours_30000", "renders", "*.png")))
 
+        reference_prefix = getattr(dataset, "reference_prefix", None) or "IMG_0000"
         for idx, camera in enumerate(sorted(scene.train_cameras, key=lambda cam: cam.image_name)):
-            if not camera.image_name.startswith("IMG_0000"):
+            if not camera.image_name.startswith(reference_prefix):
                 continue
             image_path = previous_rendered_path[idx]
             rendered_image = Image.open(image_path)
@@ -539,8 +534,13 @@ def refine_optimize(dataset, opt, pipe, gaussians, scene, hloc_cameras, canonica
 
     images_all = sorted([cam.image_name for cam in hloc_cameras_all])
     temporal_inputs = sorted(set([image.split('/')[0] for image in images_all]))
-    if "IMG_0000" not in temporal_inputs:
-        temporal_inputs.insert(0, "IMG_0000")
+    # The baseline/reference-scene folder (reference_prefix, "IMG_0000" for the demo scenes)
+    # must be temporal_inputs[0] regardless of alphabetical sort order, since target_timestep=0
+    # and everything downstream indexes into temporal_inputs assuming index 0 is the baseline.
+    reference_prefix = getattr(dataset, "reference_prefix", None) or "IMG_0000"
+    if reference_prefix in temporal_inputs:
+        temporal_inputs.remove(reference_prefix)
+    temporal_inputs.insert(0, reference_prefix)
 
     ## Initialize MASt3R pcds (Refer to InstantSplat's method)
     object_indices = {}
@@ -707,7 +707,11 @@ def refine_optimize(dataset, opt, pipe, gaussians, scene, hloc_cameras, canonica
 
         if time_idx == 0 and not use_previous_viewpoints:
             image_idx = int(len(images_all)/2 + int(viewpoint_cam.image_name.split('/')[-1].split('.')[0]))
-            if int(images_all[image_idx].split('/')[0].split('_')[1]) in opt.invalid_initialization:
+            # Update-timestep folders are only numerically suffixed (IMG_0002, ...) for the
+            # sequential demo-scene convention; a non-numeric folder (e.g. "L5_art") can never
+            # be in opt.invalid_initialization (a list of ints), so skip the check for it.
+            change_suffix = images_all[image_idx].split('/')[0].split('_')[1] if '_' in images_all[image_idx].split('/')[0] else ''
+            if change_suffix.isdigit() and int(change_suffix) in opt.invalid_initialization:
                 loss *= opt.initial_time_loss_weight
     
         loss.backward()
@@ -844,7 +848,7 @@ def refine_optimize(dataset, opt, pipe, gaussians, scene, hloc_cameras, canonica
             os.makedirs(os.path.join(render_all_path, str(time_idx)), exist_ok=True)
             os.makedirs(os.path.join(capture_all_path, str(time_idx)), exist_ok=True)
             if not skip_localization:
-                localize_render_gaussians(dataset, pipe, gaussians, scene, background, object_indices, time_idx, target_timestep, opacity_filters, object_tracks, est_mats, source_path, output_dir, os.path.join(render_all_path, str(time_idx)), os.path.join(capture_all_path, str(time_idx)), est_mats_errors)
+                localize_render_gaussians(dataset, pipe, gaussians, scene, background, object_indices, time_idx, target_timestep, opacity_filters, object_tracks, est_mats, source_path, output_dir, os.path.join(render_all_path, str(time_idx)), os.path.join(capture_all_path, str(time_idx)), temporal_inputs[time_idx], est_mats_errors)
             else:
                 dataset.train_test_exp = False
                 test_cam = [cam for cam in scene.test_cameras if cam.image_name.split('/')[0] == temporal_inputs[time_idx]] # scene.test_cameras 

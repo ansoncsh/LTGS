@@ -8,7 +8,7 @@ from utils.graphics_utils import focal2fov
 from scene.dataset_readers import CameraInfo
 from scene.colmap_loader import qvec2rotmat, rotmat2qvec
 
-from hloc import extract_features, match_features, pairs_from_exhaustive, visualization
+from hloc import extract_features, match_features, pairs_from_exhaustive, pairs_from_retrieval, visualization
 from hloc.localize_sfm import QueryLocalizer, pose_from_cluster
 from hloc.utils import viz_3d
 import pycolmap
@@ -38,6 +38,29 @@ def extract_sort_key(path):
     ext = "png" if filename.endswith("png") else "jpg"
     number = int(re.search(r'_(\d+)\.'+ext, filename).group(1))
     return (folder, number)
+
+def extract_timestamp(name):
+    """Parse the leading unix-timestamp prefix from a scanner filename such as
+    'map_0/camera_1/1787891216.319087_1.jpg' -> 1787891216.319087.
+    Returns None if the basename doesn't follow that convention."""
+    basename = Path(name).name
+    match = re.match(r'^(\d+(?:\.\d+)?)_\d+\.\w+$', basename)
+    return float(match.group(1)) if match else None
+
+def filter_references_by_range(names, ref_range):
+    """Restrict a list of registered reference image names to those whose timestamp
+    falls within ref_range=(start, end) inclusive. names without a parseable timestamp
+    are kept as-is (fail open) so this only narrows scanner-style datasets.
+    ref_range=None returns names unchanged, preserving today's full-exhaustive behavior."""
+    if ref_range is None:
+        return names
+    start, end = ref_range
+    filtered = []
+    for name in names:
+        ts = extract_timestamp(name)
+        if ts is None or (start <= ts <= end):
+            filtered.append(name)
+    return filtered
 
 def colmap_localization(dataset):
     source_path = Path(dataset.source_path)
@@ -83,22 +106,22 @@ def colmap_localization(dataset):
 
     print("COLMAP localization pipeline done!")
 
-def hloc_localization(dataset, known_intrinsics=False):
+def hloc_localization(dataset, known_intrinsics=False, ref_range=None, max_ref_candidates=None):
     source_path = Path(dataset.source_path) # ends with hloc
     images_path = source_path.parent / "images"
     query_path = images_path / "changes.txt"
 
-    with open(query_path, 'r') as file:            
+    with open(query_path, 'r') as file:
         image_filenames = file.read().strip().split()
     query_list = sorted(image_filenames, key = extract_sort_key) if image_filenames[0].startswith("IMG_") else sorted(image_filenames)
-    
+
     # original features and matches from SfM
     sfm_features = source_path / "features.h5"
     sfm_matches = source_path / "matches.h5"
     sfm_pairs = source_path / "pairs-netvlad.txt"
     sfm_model_path = source_path / "sparse/0"
     model = pycolmap.Reconstruction(sfm_model_path)
-    
+
     # fig = viz_3d.init_figure()
     # viz_3d.plot_reconstruction(fig, model, color='rgba(255,0,0,0.5)', name="mapping", points_rgb=True)
 
@@ -109,20 +132,79 @@ def hloc_localization(dataset, known_intrinsics=False):
     results = outputs / "results.txt"
 
     os.makedirs(outputs, exist_ok=True)
-    shutil.copy(sfm_features, features)
-    shutil.copy(sfm_matches, matches)
-    
+    # Only seed from the base SfM features/matches the first time - these files
+    # accumulate per-query entries across the whole query_list loop below (each
+    # query is cheap to re-derive from these caches on a rerun), so blindly
+    # re-copying the base file on every call would destroy that accumulated
+    # work (e.g. after a crash partway through a long run).
+    if not features.exists():
+        shutil.copy(sfm_features, features)
+    if not matches.exists():
+        shutil.copy(sfm_matches, matches)
+
     feature_conf = extract_features.confs["superpoint_aachen"]  # type: ignore
     matcher_conf = match_features.confs["superglue"]  # type: ignore
     references_registered = [model.images[i].name for i in model.reg_image_ids()]
-    
+    references_registered = filter_references_by_range(references_registered, ref_range)
+
+    # For large reference sets, exhaustively matching every query against every
+    # reference in `references_registered` (e.g. thousands within ref_range) is
+    # far too slow. Narrow candidates with NetVLAD image retrieval first, same
+    # technique prepare_partial_update.py uses to build the reference pairs.
+    retrieval = None
+    if max_ref_candidates is not None:
+        retrieval_conf = extract_features.confs["netvlad"]  # type: ignore
+        retrieval = outputs / "retrieval.h5"
+        extract_features.main(retrieval_conf, images_path, image_list=references_registered,
+                               feature_path=retrieval, overwrite=False)
+
+    # extract_features.main/match_features.main's own overwrite=False skip-check
+    # calls list_h5_names(), which does a full h5py visititems() traversal of the
+    # WHOLE file on every call - fine once, but with ~48k+ accumulated entries
+    # (all references + all queries) this took ~30s per call and made a
+    # per-query loop (4401 iterations) prohibitively slow even when everything
+    # was already cached from a prior run. Precompute the cached-name sets once
+    # here and skip calling into hloc entirely for names already present.
+    from hloc.utils.io import list_h5_names
+    cached_feature_names = set(list_h5_names(features)) if features.exists() else set()
+    cached_retrieval_names = set(list_h5_names(retrieval)) if retrieval is not None and retrieval.exists() else set()
+
+    # Similarly, pairs_from_retrieval.main rescans the whole retrieval.h5 (via
+    # list_h5_names) and reloads all reference descriptors on every call.
+    # Precompute the reference descriptor matrix once and do the per-query
+    # top-k selection ourselves instead of calling pairs_from_retrieval.main
+    # inside the loop.
+    db_desc = None
+    if retrieval is not None:
+        from hloc.pairs_from_retrieval import get_descriptors, pairs_from_score_matrix
+        db_desc = get_descriptors(references_registered, retrieval)
+
     hloc_results = []
 
     for query in query_list:
-        extract_features.main(feature_conf, images_path, image_list=[query], feature_path=features, overwrite=True)
-        pairs_from_exhaustive.main(loc_pairs, image_list=[query], ref_list=references_registered)
-        match_features.main(matcher_conf, loc_pairs, features=features, matches=matches, overwrite=True)
-        if not known_intrinsics:  
+        # overwrite=False: reuse a query's cached SuperPoint features/matches
+        # from a prior (possibly crashed) run instead of recomputing them. Skip
+        # the hloc call entirely when already cached (see note above).
+        if query not in cached_feature_names:
+            extract_features.main(feature_conf, images_path, image_list=[query], feature_path=features, overwrite=False)
+            cached_feature_names.add(query)
+        if retrieval is not None:
+            retrieval_conf = extract_features.confs["netvlad"]  # type: ignore
+            if query not in cached_retrieval_names:
+                extract_features.main(retrieval_conf, images_path, image_list=[query], feature_path=retrieval, overwrite=False)
+                cached_retrieval_names.add(query)
+            query_desc = get_descriptors([query], retrieval)
+            sim = torch.einsum("id,jd->ij", query_desc, db_desc)
+            self_match = np.array([query])[:, None] == np.array(references_registered)[None]
+            num_matched = min(max_ref_candidates, len(references_registered))
+            pairs = pairs_from_score_matrix(sim, self_match, num_matched, min_score=0)
+            pairs = [(query, references_registered[j]) for _, j in pairs]
+            with open(loc_pairs, "w") as f:
+                f.write("\n".join(" ".join(p) for p in pairs))
+        else:
+            pairs_from_exhaustive.main(loc_pairs, image_list=[query], ref_list=references_registered)
+        match_features.main(matcher_conf, loc_pairs, features=features, matches=matches, overwrite=False)
+        if not known_intrinsics:
             camera = pycolmap.infer_camera_from_image(images_path / query)
             refine_focal_length = True
         else:
@@ -133,7 +215,17 @@ def hloc_localization(dataset, known_intrinsics=False):
                 params=model.cameras[1].params
             )
             refine_focal_length = False
-        ref_ids = [model.find_image_with_name(n).image_id for n in references_registered]
+        # Restrict to the references this query was actually matched against
+        # (loc_pairs), not the full references_registered candidate pool -
+        # with retrieval narrowing, matches.h5 only has entries for the
+        # retrieved subset.
+        query_refs = []
+        with open(loc_pairs, 'r') as f:
+            for line in f:
+                parts = line.split()
+                if len(parts) == 2 and parts[0] == query:
+                    query_refs.append(parts[1])
+        ref_ids = [model.find_image_with_name(n).image_id for n in query_refs]
         conf = {
             'estimation': {'ransac': {'max_error': 12}},
             'refinement': {'refine_focal_length': refine_focal_length, 'refine_extra_params': True},
@@ -160,19 +252,19 @@ def hloc_localization(dataset, known_intrinsics=False):
     
     return hloc_results
 
-def find_test_cam_poses(dataset, scene_info, known_intrinsics=True):
+def find_test_cam_poses(dataset, scene_info, known_intrinsics=True, ref_range=None, max_ref_candidates=None):
     source_path = Path(dataset.source_path) # ends with hloc
     images_path = source_path.parent / "images"
     test_set = [camera.image_name for camera in scene_info.test_cameras]
     query_list = sorted(test_set, key = extract_sort_key) if test_set[0].startswith("IMG_") else sorted(test_set)
-    
+
     # original features and matches from SfM
     sfm_features = source_path / "features.h5"
     sfm_matches = source_path / "matches.h5"
     sfm_pairs = source_path / "pairs-netvlad.txt"
     sfm_model_path = source_path / "sparse/0"
     model = pycolmap.Reconstruction(sfm_model_path)
-    
+
     # fig = viz_3d.init_figure()
     # viz_3d.plot_reconstruction(fig, model, color='rgba(255,0,0,0.5)', name="mapping", points_rgb=True)
 
@@ -185,17 +277,33 @@ def find_test_cam_poses(dataset, scene_info, known_intrinsics=True):
     os.makedirs(outputs, exist_ok=True)
     shutil.copy(sfm_features, features)
     shutil.copy(sfm_matches, matches)
-    
+
     feature_conf = extract_features.confs["superpoint_aachen"]  # type: ignore
     matcher_conf = match_features.confs["superglue"]  # type: ignore
     references_registered = [model.images[i].name for i in model.reg_image_ids()]
-    
+    references_registered = filter_references_by_range(references_registered, ref_range)
+
+    # See hloc_localization: narrow candidates with NetVLAD retrieval for large
+    # reference sets instead of exhaustively matching against all of them.
+    retrieval = None
+    if max_ref_candidates is not None:
+        retrieval_conf = extract_features.confs["netvlad"]  # type: ignore
+        retrieval = outputs / "retrieval.h5"
+        extract_features.main(retrieval_conf, images_path, image_list=references_registered,
+                               feature_path=retrieval, overwrite=True)
+
     hloc_results = []
 
     for query in query_list:
         if query not in references_registered:
             extract_features.main(feature_conf, images_path, image_list=[query], feature_path=features, overwrite=True)
-            pairs_from_exhaustive.main(loc_pairs, image_list=[query], ref_list=references_registered)
+            if retrieval is not None:
+                retrieval_conf = extract_features.confs["netvlad"]  # type: ignore
+                extract_features.main(retrieval_conf, images_path, image_list=[query], feature_path=retrieval, overwrite=False)
+                pairs_from_retrieval.main(retrieval, loc_pairs, num_matched=min(max_ref_candidates, len(references_registered)),
+                                           query_list=[query], db_list=references_registered)
+            else:
+                pairs_from_exhaustive.main(loc_pairs, image_list=[query], ref_list=references_registered)
             match_features.main(matcher_conf, loc_pairs, features=features, matches=matches, overwrite=True)
             if not known_intrinsics:  
                 camera = pycolmap.infer_camera_from_image(images_path / query)
@@ -208,13 +316,19 @@ def find_test_cam_poses(dataset, scene_info, known_intrinsics=True):
                     params=model.cameras[1].params
                 )
                 refine_focal_length = False
-            ref_ids = [model.find_image_with_name(n).image_id for n in references_registered]
+            query_refs = []
+            with open(loc_pairs, 'r') as f:
+                for line in f:
+                    parts = line.split()
+                    if len(parts) == 2 and parts[0] == query:
+                        query_refs.append(parts[1])
+            ref_ids = [model.find_image_with_name(n).image_id for n in query_refs]
             conf = {
                 'estimation': {'ransac': {'max_error': 12}},
                 'refinement': {'refine_focal_length': refine_focal_length, 'refine_extra_params': True},
             }
             localizer = QueryLocalizer(model, conf)
-            
+
             ret, log = pose_from_cluster(localizer, query, camera, ref_ids, features, matches)
             print(f'found {ret["num_inliers"]}/{len(ret["inliers"])} inlier correspondences.')
             ret["name"] = query

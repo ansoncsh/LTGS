@@ -93,7 +93,7 @@ def localize_render_gaussians(dataset, pipe, gaussians, scene, background, sourc
         images_path = file.read().strip().split()
     change_dir = images_path[0].split('/')[0]
     
-    scene_info = sceneLoadTypeCallbacks["Colmap"](str(source_path.parent), dataset.images, dataset.depths, True, dataset.train_test_exp, change_dir=change_dir)
+    scene_info = sceneLoadTypeCallbacks["Colmap"](str(source_path.parent), dataset.images, dataset.depths, True, dataset.train_test_exp, change_dir=change_dir, reference_prefix=getattr(dataset, "reference_prefix", None) or "IMG_0000")
     if not os.path.exists(test_hloc_path):
         test_hloc_results = find_test_cam_poses(dataset, scene_info)
         save_hloc_results(test_hloc_results, test_hloc_path)
