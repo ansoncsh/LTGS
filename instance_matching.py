@@ -17,7 +17,7 @@ from collections import defaultdict
             
 import shutil
 from src.utils.localization_utils import extract_sort_key
-from src.utils.matching_utils import intra_instance_matching, inter_instance_matching, multi_sequence_intra_matching, multi_sequence_inter_matching
+from src.utils.matching_utils import intra_instance_matching, inter_instance_matching, multi_sequence_intra_matching, multi_sequence_inter_matching, MIN_CONSISTENT_VIEWS
 
 def load_sam_outputs(dataset : ModelParams):
     source_path = Path(dataset.source_path)
@@ -98,7 +98,7 @@ def instance_matching(dataset: ModelParams, args):
                 for key, obj_idx in initial_object_list.items():
                     if key[0] not in temporal_idx:
                         continue
-                    if (counts[obj_idx] == len(temporal_idx)) or counts[obj_idx] == 0:
+                    if counts[obj_idx] >= min(MIN_CONSISTENT_VIEWS, len(temporal_idx)) or counts[obj_idx] == 0:
                         pass
                     else:
                         inconsistent_keys.append(key)

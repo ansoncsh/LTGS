@@ -26,6 +26,16 @@ ratios_resolutions = {
     4 / 3: [384, 512], 32 / 21: [336, 512], 16 / 9: [288, 512], 2 / 1: [256, 512], 16 / 5: [160, 512]
 }
 
+# track_mast3r_matches' filter_consistent=True used to require an object to appear
+# in literally every input image (counts[obj] == len(inputfiles)) - fine for a
+# couple of images all pointed at the same object, but for a many-viewpoint
+# walkthrough almost nothing survives every single view, while
+# filter_consistent=False keeps every one-off SAM fragment as its own "object",
+# ballooning the object count into the hundreds (which then overflows
+# flashsplat's CUDA kernel). This threshold is the middle ground: an object must
+# be seen from at least this many distinct images to count as real.
+MIN_CONSISTENT_VIEWS = 3
+
 def get_h_w(H, W):
     # ratios_resolutions is keyed/valued for the landscape case (long side on
     # width, matching MASt3R's own "512x384, 512x336, ..." resolutions - long
@@ -167,7 +177,8 @@ def track_mast3r_matches(inputfiles, input_object_masks, tmp_pairs, min_conf_thr
         for (image_idx, _), obj_idx in object_list.items():
             counts[obj_idx] += 1
 
-        valid_objs = {obj for obj in object_list.values() if (counts[obj] == len(inputfiles) or counts[obj] == 0)}
+        min_views = min(MIN_CONSISTENT_VIEWS, len(inputfiles))
+        valid_objs = {obj for obj in object_list.values() if counts[obj] >= min_views}
         valid_object_entries = {k: v for k, v in object_list.items() if v in valid_objs}
 
         unique_ids = sorted(set(valid_object_entries.values()))
