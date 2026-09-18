@@ -217,21 +217,30 @@ def fuse_multiview_descriptors(before_pcds, after_pcds, change_cameras, matching
 
             proj2_xy[...,0], proj2_xy[...,1] = (W-1) / 2 * (proj2_xy[...,0]+1), (H-1) / 2 * (proj2_xy[...,1]+1) 
 
+        def _find_obj_mask_idx(object_mask):
+            # obj_label being part of this object's overall track doesn't mean it's
+            # detected in every individual camera view (e.g. occluded/out of frame in
+            # a multi-view walkthrough) - fall back to None instead of crashing so the
+            # caller's existing `if ... is None: continue` skips this view like it
+            # already does for views outside has_before/has_after.
+            match = torch.where(object_mask == obj_label)[0]
+            return match[0].item() if len(match) > 0 else None
+
         if not has_before:
             proj_1 = torch.empty_like(proj_2)
             obj_mask_idx = [
-                torch.where(object_mask == obj_label)[0][0].item() if idx not in src_indices else None
+                _find_obj_mask_idx(object_mask) if idx not in src_indices else None
                 for idx, object_mask in enumerate(object_masks)
             ]
         elif not has_after:
             proj_2 = torch.empty_like(proj_1)
             obj_mask_idx = [
-                torch.where(object_mask == obj_label)[0][0].item() if idx in src_indices else None
+                _find_obj_mask_idx(object_mask) if idx in src_indices else None
                 for idx, object_mask in enumerate(object_masks)
             ]
         else:
             # Acccumulate descriptors for all pairs
-            obj_mask_idx = [torch.where(object_mask==obj_label)[0][0].item() for object_mask in object_masks]
+            obj_mask_idx = [_find_obj_mask_idx(object_mask) for object_mask in object_masks]
 
         proj_xy = []
         idx_1, idx_2 = 0, 0
@@ -273,7 +282,7 @@ def fuse_multiview_descriptors(before_pcds, after_pcds, change_cameras, matching
         fig, axes = plt.subplots(2, int(len(object_masks)/2), figsize=(12, 6))
         for i, pair in enumerate(pairs):
             for j, pair_elem in enumerate(pair):
-                if proj_xy[pair_elem] is None:
+                if proj_xy[pair_elem] is None or obj_mask_idx[pair_elem] is None:
                     continue
 
                 x, y = proj_xy[pair_elem][:,0], proj_xy[pair_elem][:,1]
