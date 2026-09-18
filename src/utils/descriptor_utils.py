@@ -303,17 +303,22 @@ def fuse_multiview_descriptors(before_pcds, after_pcds, change_cameras, matching
                     count_2.append(count)
 
                 # # debug & visualize
-                pca_desc = compute_pca_image(sampled_desc)
-                row, col = pair_elem % 2, pair_elem // 2  
-                axes[row, col].scatter(x, y, c=pca_desc, s=5, alpha=0.6)
+                # An object matched via other views can still end up with zero sampled
+                # points for this particular camera (e.g. its only valid keypoints fell
+                # outside the projected mask) - nothing to plot, and PCA needs at least
+                # one sample.
+                if len(sampled_desc) > 0:
+                    pca_desc = compute_pca_image(sampled_desc)
+                    row, col = pair_elem % 2, pair_elem // 2
+                    axes[row, col].scatter(x, y, c=pca_desc, s=5, alpha=0.6)
 
-                axes[row, col].set_title(f'Camera {pair_elem}')
-                axes[row, col].set_xlim([0, W])
-                axes[row, col].set_ylim([H, 0])
+                    axes[row, col].set_title(f'Camera {pair_elem}')
+                    axes[row, col].set_xlim([0, W])
+                    axes[row, col].set_ylim([H, 0])
 
-                # axes[row, col].set_xlabel('NDC X')
-                # axes[row, col].set_ylabel('NDC Y')
-                axes[row, col].grid(True)
+                    # axes[row, col].set_xlabel('NDC X')
+                    # axes[row, col].set_ylabel('NDC Y')
+                    axes[row, col].grid(True)
                 
                 # print(count.sum())
 
