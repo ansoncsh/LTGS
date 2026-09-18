@@ -356,7 +356,14 @@ def update_3dgs(dataset: ModelParams, opt: UpdateParams, pipe: PipelineParams, i
 
         # If fail to register, change labels
         for obj_label in matching_obj_label.copy():
-            transformed_obj_kpts = obj_kpts_1[obj_label] @ est_mat[obj_label][:3, :3].T + est_mat[obj_label][:3, 3:4].T 
+            if obj_label not in est_mat:
+                # Too few 3D correspondences for TEASER++ to register; treat the same as a failed match.
+                print(f"Skipping registration for {obj_label} : not enough correspondences")
+                matching_obj_label.remove(obj_label)
+                removed_obj_label.append(obj_label)
+                inserted_obj_label.append(obj_label)
+                continue
+            transformed_obj_kpts = obj_kpts_1[obj_label] @ est_mat[obj_label][:3, :3].T + est_mat[obj_label][:3, 3:4].T
             dist = chamfer_distance(transformed_obj_kpts[None], obj_kpts_2[obj_label][None])
             print(f"Chamfer Distance for {obj_label} : {dist}")
             if dist > opt.overlap_thres:

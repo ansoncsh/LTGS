@@ -222,6 +222,8 @@ def compose_mat4_from_teaserpp_solution(solution):
 
 #     return solver_params
 
+MIN_TEASER_CORRESPONDENCES = 3
+
 def run_teaserpp(obj_kpts_1, obj_kpts_2, matching_obj_labels):
     solver_params = teaserpp_python.RobustRegistrationSolver.Params()
     solver_params.cbar2 = 1
@@ -235,10 +237,16 @@ def run_teaserpp(obj_kpts_1, obj_kpts_2, matching_obj_labels):
     est_mats = {}
     
     for obj_label in matching_obj_labels:
-        solver = teaserpp_python.RobustRegistrationSolver(solver_params)
-        # start = time.time()
         src = obj_kpts_1[obj_label].transpose(1,0)
         dst = obj_kpts_2[obj_label].transpose(1,0)
+        # TEASER++'s TIM computation segfaults (OMP out-of-bounds) with too few
+        # correspondences; fewer than 3 points can't yield a meaningful rigid
+        # transform anyway, so skip and let the caller treat this as a failed match.
+        if src.shape[1] < MIN_TEASER_CORRESPONDENCES:
+            continue
+
+        solver = teaserpp_python.RobustRegistrationSolver(solver_params)
+        # start = time.time()
         solver.solve(src, dst)
         # end = time.time()
 
