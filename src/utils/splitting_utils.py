@@ -68,8 +68,9 @@ def flashsplat(dataset : ModelParams, iteration : int, pipeline : PipelineParams
                 if obj_id > 0 and obj_id not in object_lists:
                     object_lists.append(obj_id)
 
-            render_masks.append(torch.from_numpy(obj_mask).to("cuda").to(torch.float32))   
+            render_masks.append(torch.from_numpy(obj_mask).to("cuda").to(torch.float32))
         obj_num = len(object_lists)
+        print(f"DEBUG flashsplat: obj_num={obj_num} object_lists={object_lists} len(render_masks)={len(render_masks)}", flush=True)
 
         gaussians = GaussianModel(dataset.sh_degree)
         scene = Scene(dataset, gaussians, load_iteration=iteration, shuffle=False)
@@ -88,9 +89,13 @@ def flashsplat(dataset : ModelParams, iteration : int, pipeline : PipelineParams
         mapping = {}
         num_observation = {}
 
+        print(f"DEBUG flashsplat: view_num={view_num} len(views_used)={len(views_used)}", flush=True)
         if obj_num > 0:
             for idx, view in enumerate(views_used):
                 render_mask = render_masks[idx].to(torch.float32)
+                print(f"DEBUG flashsplat: idx={idx} render_mask.shape={tuple(render_mask.shape)} "
+                      f"sum={render_mask.sum().item()} per_row_max={[int(m.max().item()) for m in render_mask]} "
+                      f"mapping={mapping}", flush=True)
                 if render_mask.sum() == 0:
                     continue
                 for row, mask in enumerate(render_mask):
