@@ -484,6 +484,10 @@ def inter_instance_matching(dataset, object_lists: list, object_masks: list, emb
 
             obj[object_mask[j] > 0] = obj_idx+1
             objects.append(obj)
+        # An empty list saves as a bare (0,) array, which downstream code
+        # (e.g. pcd_initialization.py's object_masks[0].shape[-2:]) can't
+        # unpack as (N, H, W) - keep the spatial shape even with 0 objects.
+        objects = np.stack(objects, axis=0) if objects else np.zeros((0, H, W), dtype=int)
         np.save(object_mask_path, objects)
 
     print("Saved Instance Masks!")
@@ -723,6 +727,10 @@ def multi_sequence_inter_matching(object_lists_per_timestep, fixed_object_list, 
 
                 obj[object_mask[j] > 0] = obj_idx+1
                 objects.append(obj)
+            # An empty list saves as a bare (0,) array, which downstream code
+            # (e.g. pcd_initialization.py's object_masks[0].shape[-2:]) can't
+            # unpack as (N, H, W) - keep the spatial shape even with 0 objects.
+            objects = np.stack(objects, axis=0) if objects else np.zeros((0, H, W), dtype=int)
             np.save(object_mask_path, objects)
 
         # print("Saved Instance Masks!")
