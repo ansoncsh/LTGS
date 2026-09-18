@@ -27,16 +27,24 @@ ratios_resolutions = {
 }
 
 def get_h_w(H, W):
+    # ratios_resolutions is keyed/valued for the landscape case (long side on
+    # width, matching MASt3R's own "512x384, 512x336, ..." resolutions - long
+    # side always 512). For a portrait image the long side is the height, so
+    # the looked-up (h, w) pair needs to be swapped, or every downstream
+    # keypoint rescale in track_mast3r_matches ends up using the wrong axis's
+    # scale factor.
     ratio = W / H
     ref_ratios = np.array([*(ratios_resolutions.keys())])
     islandscape = (W >= H)
     if islandscape:
         diff = np.abs(ratio - ref_ratios)
+        selkey = ref_ratios[np.argmin(diff)]
+        h, w = ratios_resolutions[selkey]
     else:
         diff = np.abs(ratio - (1 / ref_ratios))
-    selkey = ref_ratios[np.argmin(diff)]
-    res = ratios_resolutions[selkey]
-    return res
+        selkey = ref_ratios[np.argmin(diff)]
+        w, h = ratios_resolutions[selkey]
+    return h, w
 
 def remap_object_indices(final_object_list):
     unique_ids = sorted(set(final_object_list.values()))
