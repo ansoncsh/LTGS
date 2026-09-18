@@ -56,29 +56,20 @@ def _capped_gescf_size(w, h, max_side=MAX_GESCF_SIDE):
     scale = max_side / max(w, h)
     return (max(1, round(w * scale)), max(1, round(h * scale)))
 
-_worker_models = {}
+_worker_model = None
 
-def _init_change_detection_worker(alpha_t, cosine_thr, ssim_ratio, kernel_ratio):
-    # Each worker process lazily builds one GeSCF (incl. a SAM ViT-H instance on
-    # cuda:0, ~7.4GB VRAM) per distinct (W, H) it encounters, and reuses it for
-    # every pair of that size it's assigned - pairs can differ in size (e.g. a
-    # mix of portrait/landscape captures), so a single fixed-size model isn't
-    # correct, but most runs only see a handful of distinct sizes.
-    global _worker_alpha_t, _worker_cosine_thr, _worker_ssim_ratio, _worker_kernel_ratio
-    _worker_alpha_t, _worker_cosine_thr, _worker_ssim_ratio, _worker_kernel_ratio = (
-        alpha_t, cosine_thr, ssim_ratio, kernel_ratio)
-
-def _get_worker_model(img_size):
-    model = _worker_models.get(img_size)
-    if model is None:
-        model = GeSCF(img_size=img_size, alpha_t=_worker_alpha_t, cosine_thr=_worker_cosine_thr,
-                       ssim_ratio=_worker_ssim_ratio, kernel_ratio=_worker_kernel_ratio)
-        _worker_models[img_size] = model
-    return model
+def _init_change_detection_worker(img_size, alpha_t, cosine_thr, ssim_ratio, kernel_ratio):
+    # Each worker process builds its own GeSCF (incl. a SAM ViT-H instance on
+    # cuda:0, ~7.4GB VRAM) once, then reuses it for every pair it's assigned.
+    # img_size is shared across the whole run (see change_detection() for why),
+    # not derived per-worker.
+    global _worker_model
+    _worker_model = GeSCF(img_size=img_size, alpha_t=alpha_t, cosine_thr=cosine_thr,
+                           ssim_ratio=ssim_ratio, kernel_ratio=kernel_ratio)
 
 def _process_change_pair(args):
     pair_idx, render_file, capture_file, W, H = args
-    model = _get_worker_model(_capped_gescf_size(W, H))
+    model = _worker_model
     with torch.no_grad():
         change_mask_t0, embed_t0, _ = model(render_file, capture_file)
         resized_mask_t0 = cv2.resize(change_mask_t0.astype(np.uint8), (W, H), interpolation=cv2.INTER_LINEAR)
@@ -293,29 +284,27 @@ def change_detection(dataset : ModelParams, min_size: int, max_size: int, connec
         change_masks = [None] * (2 * num_pairs)
         embeddings_list = [None] * (2 * num_pairs)
 
+        # Every pair's raw (pre-resize) embedding gets concatenated into one batched
+        # `embeddings` tensor below, so every pair must be processed at the same
+        # GeSCF img_size regardless of that pair's own native resolution - a
+        # per-pair size (tried above) makes portrait and landscape pairs come back
+        # with differently-shaped embeddings and torch.cat fails. So there's one
+        # shared img_size for the whole run, same as this code always assumed;
+        # the only change here is capping it so an oversized capture (e.g. an
+        # un-downscaled phone photo) can't blow up SAM's attention memory.
+        shared_H, shared_W = image_batch[0].shape[0], image_batch[0].shape[1]
+        shared_img_size = _capped_gescf_size(shared_W, shared_H)
+
         if manual_selection or num_workers <= 1:
-            # Build one GeSCF (SAM ViT-H, ~7.4GB VRAM) per distinct (W, H) seen
-            # across pairs, instead of a single instance sized from whichever
-            # image happens to be first - pairs can differ in size (e.g. a mix
-            # of portrait/landscape captures), and reusing one fixed size for
-            # all of them either distorts the minority-size images or, for a
-            # much larger outlier size, blows up SAM's attention memory.
-            models_by_size = {}
-            def get_model(img_size):
-                model = models_by_size.get(img_size)
-                if model is None:
-                    model = GeSCF(img_size=img_size, alpha_t=alpha_t, cosine_thr=cosine_thr,
-                                   ssim_ratio=ssim_ratio, kernel_ratio=kernel_ratio)
-                    models_by_size[img_size] = model
-                return model
+            model = GeSCF(img_size=shared_img_size, alpha_t=alpha_t, cosine_thr=cosine_thr,
+                           ssim_ratio=ssim_ratio, kernel_ratio=kernel_ratio)
+            if manual_selection:
+                predictor = SamPredictor(model.sam_backbone)
 
             # Inference
             for render_idx, capture_idx in zip(render_indices, capture_indices):
                 print(f"Detecting changes for {int(render_idx/2)+1}th set of images ...")
                 H, W = image_batch[render_idx].shape[0], image_batch[render_idx].shape[1]
-                model = get_model(_capped_gescf_size(W, H))
-                if manual_selection:
-                    predictor = SamPredictor(model.sam_backbone)
                 change_mask_t0, embed_t0, _ = model(imagefiles[render_idx], imagefiles[capture_idx])
                 resized_mask_t0 = cv2.resize(change_mask_t0.astype(np.uint8), (W, H), interpolation=cv2.INTER_LINEAR)
                 resized_mask_t0 = (resized_mask_t0 > 0.5).astype(bool)
@@ -328,7 +317,7 @@ def change_detection(dataset : ModelParams, min_size: int, max_size: int, connec
                 resized_mask_t1 = (resized_mask_t1 > 0.5).astype(bool)
                 change_masks[capture_idx] = resized_mask_t1
                 embeddings_list[capture_idx] = embed_t1
-            del models_by_size
+            del model
         else:
             # Each pair's two GeSCF forward passes (SAM automatic mask generation
             # dominated by CPU-side NMS/postprocessing, not GPU compute - see
@@ -345,7 +334,7 @@ def change_detection(dataset : ModelParams, min_size: int, max_size: int, connec
             with ctx.Pool(
                 processes=num_workers,
                 initializer=_init_change_detection_worker,
-                initargs=(alpha_t, cosine_thr, ssim_ratio, kernel_ratio),
+                initargs=(shared_img_size, alpha_t, cosine_thr, ssim_ratio, kernel_ratio),
             ) as pool:
                 for pair_i, resized_mask_t0, embed_t0, resized_mask_t1, embed_t1 in pool.imap_unordered(_process_change_pair, tasks):
                     render_idx, capture_idx = render_indices[pair_i], capture_indices[pair_i]
