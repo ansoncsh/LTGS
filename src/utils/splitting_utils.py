@@ -135,6 +135,10 @@ def flashsplat(dataset : ModelParams, iteration : int, pipeline : PipelineParams
                     obj_id = int(mask.max().item())
                     if obj_id <= 0:
                         continue
+                    if obj_id not in mapping:
+                        print(f"DEBUG flashsplat: idx={idx} row={row} obj_id={obj_id} not in mapping={mapping} "
+                              f"obj_num={obj_num} render_mask.shape={tuple(render_mask.shape)} "
+                              f"per_row_max={[int(m.max().item()) for m in render_mask]}", flush=True)
                     all_counts[mapping[obj_id]] += used_count[row+1]
 
             inverse_mapping = {value:key for key, value in mapping.items()}
