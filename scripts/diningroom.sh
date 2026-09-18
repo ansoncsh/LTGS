@@ -9,7 +9,7 @@ DEPTH_PATH=${DATA_DIR}/${SCENE}/depths
 OUTPUT=output/${SCENE}_first_state_sfm_all
 
 # HLOC localization
-CUDA_VISIBLE_DEVICES=${GPU} python localization.py -m gaussian-splatting/${OUTPUT} --skip_localization
+CUDA_VISIBLE_DEVICES=${GPU} python localization.py -s ${IMAGE_PATH}/hloc -m gaussian-splatting/${OUTPUT} --skip_localization
 # Change detection
 CUDA_VISIBLE_DEVICES=${GPU} python change_detection.py -m gaussian-splatting/${OUTPUT} --min_size 1500 --kernel_size 5 --cosine_thr 0.93
 

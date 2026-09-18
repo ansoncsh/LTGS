@@ -15,7 +15,10 @@ Seoul National University
 
 ## Overview
 
-LTGS models the long-term evolution of an indoor 3D Gaussian Splatting scene from sparse, casually captured update images. Given an initial 3DGS reconstruction and a series of sparse-view image sets captured at later time steps, LTGS detects changed objects, initializes 3D Gaussian templates for newly introduced items, and integrates them into a chronological scene representation — without re-training from scratch at each step.
+LTGS models the long-term evolution of an indoor 3D Gaussian Splatting scene from sparse, casually captured update
+images. Given an initial 3DGS reconstruction and a series of sparse-view image sets captured at later time steps, LTGS
+detects changed objects, initializes 3D Gaussian templates for newly introduced items, and integrates them into a
+chronological scene representation — without re-training from scratch at each step.
 
 ![Teaser](docs/assets/teaser.png)
 
@@ -72,6 +75,11 @@ mkdir build && cd build
 cmake -DTEASERPP_PYTHON_VERSION=3.10 .. && make teaserpp_python
 cd python && pip install .
 cd ../../../..
+
+# GeSCF change detection: download the SAM ViT-H checkpoint it depends on
+mkdir -p submodules/GeSCF/gescf/pretrained_weight
+wget https://dl.fbaipublicfiles.com/segment_anything/sam_vit_h_4b8939.pth \
+    -O submodules/GeSCF/gescf/pretrained_weight/sam_vit_h_4b8939.pth
 ```
 
 > **Note:** If you encounter a `trunc_normal_` import error from DINO, add to the affected file:
@@ -86,19 +94,21 @@ cd ../../../..
 
 ## Dataset
 
-Download the **LTGS** dataset from Google Drive: **[Download Dataset](https://drive.google.com/file/d/1qcsMhZKjr0nCiK2chGHzVUmMG5DX6gFr/view?usp=sharing)**
+Download the **LTGS** dataset from Google Drive:
+**[Download Dataset](https://drive.google.com/file/d/1qcsMhZKjr0nCiK2chGHzVUmMG5DX6gFr/view?usp=sharing)**
 
 The dataset contains 5 indoor scenes captured across multiple time steps with sparse-view image sets:
 
-| Scene | Description |
-|-------|-------------|
+| Scene        | Description                        |
+|--------------|------------------------------------|
 | `livingroom` | Living room with furniture changes |
-| `cafe` | Cafe table setup |
-| `diningroom` | Dining room |
-| `lab` | Laboratory space |
-| `hall` | Hallway |
- 
+| `cafe`       | Cafe table setup                   |
+| `diningroom` | Dining room                        |
+| `lab`        | Laboratory space                   |
+| `hall`       | Hallway                            |
+
 Place the downloaded data under `data/ltgs_dataset/`:
+
 ```
 data/ltgs_dataset/
 ├── livingroom/
@@ -114,9 +124,11 @@ data/ltgs_dataset/
 
 ### Pretrained 3DGS Models (Optional)
 
-We provide pretrained initial 3DGS checkpoints for all 5 scenes. Download from Google Drive: **[Download Pretrained Models](https://drive.google.com/file/d/14jfAYUy-8tpr0IAWI_8WEtyOfD3f6__D/view?usp=sharing)**
+We provide pretrained initial 3DGS checkpoints for all 5 scenes. Download from Google Drive:
+**[Download Pretrained Models](https://drive.google.com/file/d/14jfAYUy-8tpr0IAWI_8WEtyOfD3f6__D/view?usp=sharing)**
 
 Place them under `gaussian-splatting/output/`:
+
 ```
 gaussian-splatting/output/
 ├── livingroom_first_state/
@@ -127,6 +139,13 @@ gaussian-splatting/output/
 ```
 
 If using the pretrained models, skip Step 1 below.
+
+> **Note:** Each checkpoint's `cfg_args` file (e.g.
+> `gaussian-splatting/output/diningroom_first_state_sfm_all/cfg_args`) hardcodes the absolute
+> `source_path` of the machine it was trained on. If that path doesn't exist on your machine,
+> downstream scripts (`localization.py`, etc.) will fail to find `images/changes.txt`. Edit
+> `source_path` in `cfg_args` to point at your local copy of the scene under `data/ltgs_dataset/`
+> before running the pipeline.
 
 ---
 
@@ -147,7 +166,8 @@ cd ..
 
 ### 2. Run Long-Term Update Pipeline
 
-Use the provided scene-specific scripts to run the full LTGS pipeline (localization → change detection → instance matching → PCD initialization → long-term update):
+Use the provided scene-specific scripts to run the full LTGS pipeline (localization → change detection → instance
+matching → PCD initialization → long-term update):
 
 ```bash
 bash scripts/${SCENE}.sh
@@ -181,4 +201,11 @@ If you find this work useful, please cite:
 
 ## Acknowledgements
 
-This project builds on [3D Gaussian Splatting](https://github.com/graphdeco-inria/gaussian-splatting), [MASt3R](https://github.com/naver/mast3r), [Hierarchical-Localization](https://github.com/cvg/Hierarchical-Localization), [TEASER++](https://github.com/MIT-SPARK/TEASER-plusplus), and [GeSCF](https://github.com/AutoCompSysLab/towards-generalizable-scene-change-detection).
+This project builds
+on [3D Gaussian Splatting](https://github.com/graphdeco-inria/gaussian-splatting), [MASt3R](https://github.com/naver/mast3r), [Hierarchical-Localization](https://github.com/cvg/Hierarchical-Localization), [TEASER++](https://github.com/MIT-SPARK/TEASER-plusplus),
+and [GeSCF](https://github.com/AutoCompSysLab/towards-generalizable-scene-change-detection).
+uv add --no-build-isolation ./gaussian-splatting/submodules/diff-gaussian-rasterization
+uv add --no-build-isolation ./gaussian-splatting/submodules/simple-knn
+uv add --no-build-isolation ./gaussian-splatting/submodules/fused-ssim
+uv add --no-build-isolation ./gaussian-splatting/submodules/flashsplat-rasterization
+uv add --no-build-isolation --editable ./submodules/Hierarchical-Localization
