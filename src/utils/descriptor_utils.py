@@ -125,8 +125,14 @@ def extract_2d_descriptors(matching_obj_labels, object_masks, imagefiles, descri
                 selected_dino = dino_descriptors[selected_idx]
                 interpolated_dino = torch.nn.functional.interpolate(selected_dino[None].permute(0,3,1,2), (h,w), mode='bilinear').permute(0,2,3,1).detach().cpu()
                 interpolated_dino = interpolated_dino / torch.linalg.norm(interpolated_dino, dim=-1, keepdim=True)
-                dino_obj = compute_pca_image(interpolated_dino[0][input_object_masks[selected_idx]>0].detach().cpu().numpy())
-                zeros[input_object_masks[selected_idx]>0] = dino_obj
+                obj_pixels = input_object_masks[selected_idx] > 0
+                if obj_pixels.any():
+                    # img_selected already ensures the object appears somewhere in this
+                    # image, but after interpolating its mask down to (h, w) a very
+                    # small region can still end up with zero selected pixels here -
+                    # nothing to show, and PCA needs at least one sample.
+                    dino_obj = compute_pca_image(interpolated_dino[0][obj_pixels].detach().cpu().numpy())
+                    zeros[obj_pixels] = dino_obj
                 selected_idx += 1
                
             axes[i,j].imshow(zeros)
