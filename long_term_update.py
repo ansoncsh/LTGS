@@ -1,5 +1,6 @@
 import sys
 import os
+import gc
 from tqdm import tqdm
 import cv2 
 from argparse import ArgumentParser, Namespace
@@ -469,7 +470,19 @@ def update_3dgs(dataset: ModelParams, opt: UpdateParams, pipe: PipelineParams, i
             }
 
     print("Final canonical_pcd keys : ", src_pcds.keys())
-        
+
+    # fused_descriptors/temporal_descriptors/image_batch/object_masks/imagefiles were only
+    # needed to compute est_mats above and aren't passed into refine_optimize; without an
+    # explicit release they stay referenced (and any GPU tensors they hold stay allocated)
+    # for the entire refine loop below, which is the most memory-hungry part of this script.
+    del fused_descriptors, image_batch, object_masks, imagefiles
+    try:
+        del temporal_descriptors  # only bound if temporal_pcds had more than one timestep
+    except UnboundLocalError:
+        pass
+    gc.collect()
+    torch.cuda.empty_cache()
+
     refine_optimize(dataset, opt, pipe, gaussians, scene, hloc_cameras, src_pcds, temporal_pcds, object_tracks, est_mats, target_timestep, use_previous_viewpoints, compensate_exposure, skip_localization)
 
 def refine_optimize(dataset, opt, pipe, gaussians, scene, hloc_cameras, canonical_pcds, temporal_pcds, object_tracks, est_mats, target_timestep, use_previous_viewpoints, compensate_exposure, skip_localization):
