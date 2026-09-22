@@ -143,8 +143,8 @@ def render_gaussians(dataset, pipe, gaussians, cameras, background, object_indic
         #     rendering = rendering[..., rendering.shape[-1] // 2:]
         #     gt = gt[..., gt.shape[-1] // 2:]
 
-        renderings.append(rendering)
-        gts.append(gt)
+        renderings.append(rendering.detach().cpu())
+        gts.append(gt.detach().cpu())
 
         if render_path is not None and gt_path is not None:
             torchvision.utils.save_image(rendering, os.path.join(render_path, '{0:05d}'.format(idx) + ".png"))
@@ -323,6 +323,9 @@ def update_3dgs(dataset: ModelParams, opt: UpdateParams, pipe: PipelineParams, i
                 temporal_descriptors[idx]['proj1_xy'] = fused_descriptors[prev_time_idx][idx]['proj2_xy']
             else:
                 # Added for detached moving objects 
+                # Reset for each object. If no timestep has usable descriptors,
+                # pass the current empty entry to the failed-registration path.
+                src_time_idx = time_idx
                 no_descriptor = fused_descriptors[time_idx][idx]['desc_3d_1'] is None
                 if no_descriptor:
                     for i in range(len(fused_descriptors)):
@@ -561,7 +564,10 @@ def refine_optimize(dataset, opt, pipe, gaussians, scene, hloc_cameras, canonica
             camera.original_image = gt_image.clamp(0.0, 1.0).to(camera.data_device)
             prev_cameras_all.append(camera)
             
-    change_cameras = cameraList_from_camInfos(hloc_cameras_all, 1.0, dataset, False, True, height=hloc_cameras[0].height, width=hloc_cameras[0].width)
+    # Respect the requested working resolution and each image's aspect ratio.
+    # Forcing the first camera's native dimensions silently upsamples all views,
+    # bypasses -r and distorts mixed-orientation captures.
+    change_cameras = cameraList_from_camInfos(hloc_cameras_all, 1.0, dataset, False, True)
 
     images_all = sorted([cam.image_name for cam in hloc_cameras_all])
     temporal_inputs = sorted(set([temporal_group(image, reference_prefix) for image in images_all]))
@@ -808,7 +814,7 @@ def refine_optimize(dataset, opt, pipe, gaussians, scene, hloc_cameras, canonica
                 scene.save(iteration)
                 ## Save temporal gaussians
                 for time_idx in range(len(temporal_inputs)):
-                    scene.save_temporal(iteration, object_indices, object_tracks, est_mats, opacity_filters, time_idx, separate_sh=SPARSE_ADAM_AVAILABLE)
+                    scene.save_temporal(iteration, object_indices, object_tracks, est_mats, opacity_filters, time_idx, separate_sh=SPARSE_ADAM_AVAILABLE, est_mats_errors=est_mats_errors, target_timestep=target_timestep)
 
             # Densification -> We don't use densification for updates
             # if iteration < opt.densify_until_iter:
@@ -874,6 +880,18 @@ def refine_optimize(dataset, opt, pipe, gaussians, scene, hloc_cameras, canonica
         ## Visualize optimized 3DGS
         # visualize_geometry({}, points3d_xyz=gaussians.get_xyz.detach().cpu().numpy(), points3d_rgb=points_rgb)
         
+        # Input-view diagnostics have separate names and metrics. Never present
+        # these images (also used for geometry initialization) as held-out views.
+        for time_idx in range(1, len(temporal_inputs)):
+            cameras = [cam for cam in change_cameras if temporal_group(cam.image_name, reference_prefix) == temporal_inputs[time_idx]]
+            train_render = os.path.join(output_dir, 'update', 'render_train', str(time_idx))
+            train_gt = os.path.join(output_dir, 'update', 'gt_train', str(time_idx))
+            os.makedirs(train_render, exist_ok=True)
+            os.makedirs(train_gt, exist_ok=True)
+            render_gaussians(dataset, pipe, gaussians, cameras, background, object_indices, time_idx,
+                             target_timestep, opacity_filters, object_tracks, est_mats,
+                             train_render, train_gt, est_mats_errors)
+
         ## Render test sets in timestep target_timestep
         for time_idx in range(len(temporal_inputs)):
             os.makedirs(os.path.join(render_all_path, str(time_idx)), exist_ok=True)

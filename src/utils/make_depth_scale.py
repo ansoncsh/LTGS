@@ -80,7 +80,10 @@ if __name__ == '__main__':
     depth_params_path = os.path.join(args.base_dir, "sparse", "0", "depth_params.json")
     output_path = os.path.join(output_dir, "hloc", "depth_params.json")
 
-    cam_intrinsics, images_metas, points3d = read_model(os.path.join(args.base_dir, "sparse", "0"), ext=f".{args.model_type}")
+    # Localized point IDs belong to the SuperPoint reference when present.
+    rebuilt_reference = os.path.join(args.base_dir, 'sparse_superpoint', '0')
+    reference_path = rebuilt_reference if os.path.exists(os.path.join(rebuilt_reference, 'images.bin')) else os.path.join(args.base_dir, 'sparse', '0')
+    cam_intrinsics, images_metas, points3d = read_model(reference_path, ext=f".{args.model_type}")
     
     hloc_results = load_hloc_results(hloc_path)
     

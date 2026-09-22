@@ -34,6 +34,14 @@ def load_sam_outputs(dataset : ModelParams):
     return object_masks_loaded, embeddings_loaded
     
 def instance_matching(dataset: ModelParams, args):
+    # Sparse custom captures may observe a change in only two images.
+    global MIN_CONSISTENT_VIEWS
+    import src.utils.matching_utils as matching_utils
+    configured_views = getattr(args, 'min_consistent_views', None)
+    MIN_CONSISTENT_VIEWS = 3 if configured_views is None else configured_views
+    if MIN_CONSISTENT_VIEWS < 2:
+        raise ValueError('min_consistent_views must be at least 2')
+    matching_utils.MIN_CONSISTENT_VIEWS = MIN_CONSISTENT_VIEWS
     optim_level = args.optim_level
     matching_conf_thres = args.matching_conf_thres
     min_conf_thres = args.min_conf_thres
@@ -175,6 +183,8 @@ if __name__ == "__main__":
     parser.add_argument("--matching_conf_thres", default=2.0, type=float)
     parser.add_argument("--min_conf_thres", default=0, type=float)
     parser.add_argument("--filter_consistent", action="store_true")
+    parser.add_argument('--min_consistent_views', type=int, default=None,
+                        help='Minimum supporting views when filtering instances (default 3; use 2 for two-view changes).')
     parser.add_argument("--fix_separated", action="store_true")
     parser.add_argument("--use_hungarian", action="store_true")
     parser.add_argument("--compare_mean", action="store_true")
@@ -183,4 +193,3 @@ if __name__ == "__main__":
     print("Detecting changes in " + args.model_path)
     
     instance_matching(model.extract(args), args) 
-

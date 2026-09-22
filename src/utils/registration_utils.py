@@ -112,6 +112,13 @@ def find_3d_correspondences(before_pcds, after_pcds, fused_outputs, matching_obj
         valid_idx_1, valid_idx_2 = fused_outputs[obj_label]["valid_idx_1"], fused_outputs[obj_label]["valid_idx_2"]
         proj1_xy, proj2_xy = fused_outputs[obj_label]["proj1_xy"], fused_outputs[obj_label]["proj2_xy"]
 
+        if desc_3d_1 is None or desc_3d_2 is None or len(desc_3d_1) < 3 or len(desc_3d_2) < 3:
+            # Sparse visibility can leave an object without descriptors on one
+            # side. Represent this as a failed match, not a fabricated transform.
+            obj_kpts_1[obj_label] = np.empty((0, 3), dtype=np.float32)
+            obj_kpts_2[obj_label] = np.empty((0, 3), dtype=np.float32)
+            continue
+
         pcd1 = torch.from_numpy(before_pcds[obj_label]).to(torch.float32).cuda()
         pcd2 = torch.from_numpy(after_pcds[obj_label]).to(torch.float32).cuda()
 
@@ -306,4 +313,3 @@ def earth_movers_distance(point_cloud_src,point_cloud_tgt):
 
     loss_emd = np.mean(emd_batch)
     return loss_emd
-

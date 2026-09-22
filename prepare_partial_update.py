@@ -225,6 +225,11 @@ def build_hloc_export(out_images_dir, out_sparse0, out_hloc_dir, num_matched=20)
         feature_conf, out_images_dir, image_list=references_registered, feature_path=out_hloc_dir / "features.h5"
     )
     match_features.main(matcher_conf, pairs_path, features=feature_path, matches=out_hloc_dir / "matches.h5")
+    # Original COLMAP tracks index its original features, not the newly extracted
+    # SuperPoint features. Keep the original reconstruction for scene loading and
+    # build a separate, fixed-pose reference model for HLoc's index-based lookup.
+    from src.utils.hloc_reference import triangulate_reference
+    triangulate_reference(out_hloc_dir, out_images_dir)
     print(f"HLoc SfM export written under {out_hloc_dir}")
 
 

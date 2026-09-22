@@ -279,13 +279,9 @@ def intra_instance_matching(dataset, object_masks: list, optim_level: str, match
             os.makedirs(cache_path, exist_ok=True)
 
             cam2w = torch.from_numpy(hloc_c2w).to(torch.float32).to("cuda")
-            focal = fov2focal(hloc_cameras[0].FovY, h) # (h, w) = (288, 512)
-            K = torch.eye(3).to("cuda")
-            K[0, 0] = focal
-            K[1, 1] = focal
-            K[0, 2] = w / 2
-            K[1, 2] = h / 2
-            K = torch.tile(K.unsqueeze(0), (num_cameras, 1, 1))
+            from src.utils.camera_intrinsics import pinhole_intrinsics
+            K = torch.from_numpy(pinhole_intrinsics(
+                [cam.FovX for cam in hloc_cameras], [cam.FovY for cam in hloc_cameras], w, h)).cuda()
             
             scene_recon = get_reconstructed_scene(cache_path, model, inputfiles, shared_intrinsics=False, cam2w=cam2w, K=K, silent=False, optim_level=optim_level, matching_conf_thr=matching_conf_thres)
             pairs_in = scene_recon.sparse_ga.pairs_in

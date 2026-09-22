@@ -22,7 +22,7 @@ from utils.camera_utils import cameraList_from_camInfos
 from src.utils.localization_utils import hloc_localization, colmap_localization, readHlocCameras, save_hloc_results, hloc_results_from_colmap
 from src.utils.visualization_utils import plot_rendering
 
-def localize(dataset : ModelParams, iteration : int, pipeline : PipelineParams, skip_localization : bool, known_intrinsics:bool, separate_sh: bool, ref_range=None, max_ref_candidates=None):
+def localize(dataset : ModelParams, iteration : int, pipeline : PipelineParams, skip_localization : bool, known_intrinsics:bool, separate_sh: bool, ref_range=None, max_ref_candidates=None, min_inliers=20, query_camera_model=None, min_inlier_ratio=0.05, max_pose_references=None):
     with torch.no_grad():
         source_path = Path(dataset.source_path)
         scene_name = source_path.parent.stem if str(source_path).endswith("hloc") else source_path.stem
@@ -35,7 +35,7 @@ def localize(dataset : ModelParams, iteration : int, pipeline : PipelineParams, 
             shutil.rmtree(os.path.join(dataset.model_path, "change"))
         if not skip_localization:
             if str(source_path).endswith("hloc"):
-                hloc_results = hloc_localization(dataset, known_intrinsics, ref_range=ref_range, max_ref_candidates=max_ref_candidates)
+                hloc_results = hloc_localization(dataset, known_intrinsics, ref_range=ref_range, max_ref_candidates=max_ref_candidates, min_inliers=min_inliers, query_camera_model=query_camera_model, min_inlier_ratio=min_inlier_ratio, max_pose_references=max_pose_references)
                 # Checkpoint immediately: for large query sets this loop can take
                 # many hours, and the render loop below is a separate failure
                 # domain (GPU rendering) - don't lose the localization results
@@ -116,6 +116,12 @@ if __name__ == "__main__":
     model = ModelParams(parser, sentinel=True)
     pipeline = PipelineParams(parser)
     parser.add_argument("--iteration", default=-1, type=int)
+    parser.add_argument('--min_inliers', type=int, default=20, help='Reject weak update poses before downstream processing.')
+    parser.add_argument('--min_inlier_ratio', type=float, default=0.05)
+    parser.add_argument('--max_pose_references', type=int, default=None,
+                        help='Keep this many reference views ranked by confident matches for pose estimation.')
+    parser.add_argument('--query_camera_model', choices=['SIMPLE_PINHOLE'], default=None,
+                        help='Use for already rectified images; otherwise infer the camera model from metadata.')
     parser.add_argument("--skip_localization", action="store_true")
     # NOTE: plain `type=bool` is broken for a flag like this - argparse calls
     # bool("False") which is truthy, so "--known_intrinsics False" could never
@@ -148,6 +154,4 @@ if __name__ == "__main__":
         raise ValueError("--ref_range_start and --ref_range_end must be given together")
     ref_range = (ref_range_start, ref_range_end) if ref_range_start is not None else None
 
-    localize(model.extract(args), args.iteration, pipeline.extract(args), args.skip_localization, args.known_intrinsics, SPARSE_ADAM_AVAILABLE, ref_range=ref_range, max_ref_candidates=getattr(args, "max_ref_candidates", None))
-
-
+    localize(model.extract(args), args.iteration, pipeline.extract(args), args.skip_localization, args.known_intrinsics, SPARSE_ADAM_AVAILABLE, ref_range=ref_range, max_ref_candidates=getattr(args, "max_ref_candidates", None), min_inliers=args.min_inliers, query_camera_model=args.query_camera_model, min_inlier_ratio=args.min_inlier_ratio, max_pose_references=args.max_pose_references)

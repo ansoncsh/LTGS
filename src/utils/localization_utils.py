@@ -28,6 +28,7 @@ import tempfile
 import copy
 import json
 import re
+from src.utils.hloc_reference import reference_model_path, validate_feature_tracks, validate_localization
 
 # def extract_sort_key(filename):
 #     number_part = filename.split("/")[-1].split("_")[-1].split(".")[0]
@@ -106,7 +107,7 @@ def colmap_localization(dataset):
 
     print("COLMAP localization pipeline done!")
 
-def hloc_localization(dataset, known_intrinsics=False, ref_range=None, max_ref_candidates=None):
+def hloc_localization(dataset, known_intrinsics=False, ref_range=None, max_ref_candidates=None, min_inliers=20, query_camera_model=None, min_inlier_ratio=0.05, max_pose_references=None):
     source_path = Path(dataset.source_path) # ends with hloc
     images_path = source_path.parent / "images"
     query_path = images_path / "changes.txt"
@@ -119,8 +120,9 @@ def hloc_localization(dataset, known_intrinsics=False, ref_range=None, max_ref_c
     sfm_features = source_path / "features.h5"
     sfm_matches = source_path / "matches.h5"
     sfm_pairs = source_path / "pairs-netvlad.txt"
-    sfm_model_path = source_path / "sparse/0"
+    sfm_model_path = reference_model_path(source_path)
     model = pycolmap.Reconstruction(sfm_model_path)
+    validate_feature_tracks(model, sfm_features)
 
     # fig = viz_3d.init_figure()
     # viz_3d.plot_reconstruction(fig, model, color='rgba(255,0,0,0.5)', name="mapping", points_rgb=True)
@@ -141,6 +143,7 @@ def hloc_localization(dataset, known_intrinsics=False, ref_range=None, max_ref_c
         shutil.copy(sfm_features, features)
     if not matches.exists():
         shutil.copy(sfm_matches, matches)
+    validate_feature_tracks(model, features)
 
     feature_conf = extract_features.confs["superpoint_aachen"]  # type: ignore
     matcher_conf = match_features.confs["superglue"]  # type: ignore
@@ -206,6 +209,9 @@ def hloc_localization(dataset, known_intrinsics=False, ref_range=None, max_ref_c
         match_features.main(matcher_conf, loc_pairs, features=features, matches=matches, overwrite=False)
         if not known_intrinsics:
             camera = pycolmap.infer_camera_from_image(images_path / query)
+            if query_camera_model == 'SIMPLE_PINHOLE':
+                camera = pycolmap.Camera(model='SIMPLE_PINHOLE', width=camera.width,
+                                        height=camera.height, params=camera.params[:3])
             refine_focal_length = True
         else:
             camera = pycolmap.Camera(
@@ -226,13 +232,21 @@ def hloc_localization(dataset, known_intrinsics=False, ref_range=None, max_ref_c
                 if len(parts) == 2 and parts[0] == query:
                     query_refs.append(parts[1])
         ref_ids = [model.find_image_with_name(n).image_id for n in query_refs]
+        if max_pose_references is not None:
+            if max_pose_references < 1:
+                raise ValueError('max_pose_references must be positive')
+            from hloc.utils.io import get_matches
+            ref_ids = sorted(ref_ids, key=lambda image_id: np.sum(
+                get_matches(matches, query, model.images[image_id].name)[1] > 0.2),
+                reverse=True)[:max_pose_references]
         conf = {
-            'estimation': {'ransac': {'max_error': 12}},
+            'estimation': {'ransac': {'max_error': 12, 'max_num_trials': 1000000, 'min_inlier_ratio': 0.01}},
             'refinement': {'refine_focal_length': refine_focal_length, 'refine_extra_params': True},
         }
         localizer = QueryLocalizer(model, conf)
 
         ret, log = pose_from_cluster(localizer, query, camera, ref_ids, features, matches)
+        validate_localization(ret, model, query, min_inliers, min_inlier_ratio)
         print(f'found {ret["num_inliers"]}/{len(ret["inliers"])} inlier correspondences.')
         ret["name"] = query
         ret["points3D_ids"] = np.array(log['points3D_ids'])[ret['inliers']]
@@ -256,27 +270,32 @@ def find_test_cam_poses(dataset, scene_info, known_intrinsics=True, ref_range=No
     source_path = Path(dataset.source_path) # ends with hloc
     images_path = source_path.parent / "images"
     test_set = [camera.image_name for camera in scene_info.test_cameras]
+    if not test_set:
+        raise ValueError('No held-out cameras available for localization.')
     query_list = sorted(test_set, key = extract_sort_key) if test_set[0].startswith("IMG_") else sorted(test_set)
 
     # original features and matches from SfM
     sfm_features = source_path / "features.h5"
     sfm_matches = source_path / "matches.h5"
     sfm_pairs = source_path / "pairs-netvlad.txt"
-    sfm_model_path = source_path / "sparse/0"
+    sfm_model_path = reference_model_path(source_path)
     model = pycolmap.Reconstruction(sfm_model_path)
+    validate_feature_tracks(model, sfm_features)
 
     # fig = viz_3d.init_figure()
     # viz_3d.plot_reconstruction(fig, model, color='rgba(255,0,0,0.5)', name="mapping", points_rgb=True)
 
-    outputs = source_path / "localization"
+    outputs = source_path / "test_localization"
     features = outputs / "features.h5"
     matches = outputs / "matches.h5"
     loc_pairs = outputs / "pairs-loc.txt"
     results = outputs / "results.txt"
 
     os.makedirs(outputs, exist_ok=True)
-    shutil.copy(sfm_features, features)
-    shutil.copy(sfm_matches, matches)
+    if not features.exists():
+        shutil.copy(sfm_features, features)
+    if not matches.exists():
+        shutil.copy(sfm_matches, matches)
 
     feature_conf = extract_features.confs["superpoint_aachen"]  # type: ignore
     matcher_conf = match_features.confs["superglue"]  # type: ignore

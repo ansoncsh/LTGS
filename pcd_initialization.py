@@ -79,13 +79,9 @@ def object_pcds_from_mast3r(dataset: ModelParams, change_cameras: list, timestep
     
     # Backproject to make dense pcds
     pixels = torch.from_numpy(np.mgrid[:W, :H].T.reshape(-1, 2)).float().to("cuda")
-    focal = fov2focal(change_cameras[0].FoVy, H)
-    K = torch.eye(3).to("cuda")
-    K[0, 0] = focal
-    K[1, 1] = focal
-    K[0, 2] = W / 2
-    K[1, 2] = H / 2
-    K = torch.tile(K.unsqueeze(0), (num_cameras, 1, 1))
+    from src.utils.camera_intrinsics import pinhole_intrinsics
+    K = torch.from_numpy(pinhole_intrinsics(
+        [cam.FoVx for cam in change_cameras], [cam.FoVy for cam in change_cameras], W, H)).cuda()
 
     invK = inv(K)
     all_pts3d = []
